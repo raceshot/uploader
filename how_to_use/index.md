@@ -1,10 +1,14 @@
 # 運動拍檔上傳工具 使用說明
 
+## [下載連結](https://github.com/raceshot/uploader/releases)
+
 當您成功下載並開啟運動拍檔上傳工具後，請參考以下使用說明。
 
-> 若您在開啟過程發生問題，請先參考以下連結
-> Mac OS 安裝指南：https://github.com/raceshot/uploader/blob/main/installation_instructions/mac_install_guide.md
-> Windows 安裝指南：https://github.com/raceshot/uploader/blob/main/installation_instructions/windows_install_guide.md
+> 若您在開啟過程發生問題，請先參考以下文件
+
+> * [Mac OS 安裝指南](https://github.com/raceshot/uploader/blob/main/installation_instructions/mac_install_guide.md)
+
+> * [Windows 安裝指南](https://github.com/raceshot/uploader/blob/main/installation_instructions/windows_install_guide.md)
 
 ## 使用說明
 
