@@ -41,16 +41,9 @@ jobs:
           pip install -r requirements.txt
           pip install Pillow
 
-      - name: Build executable (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Build executable
         run: |
-          chmod +x ${{ matrix.build_script }}
-          ./${{ matrix.build_script }}
-
-      - name: Build executable (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          ${{ matrix.build_script }}
+          pyinstaller raceshot_uploader.spec --clean --noconfirm
 
       - name: Package for distribution (macOS)
         if: runner.os == 'macOS'

@@ -35,7 +35,7 @@ if exist "dist" rmdir /s /q dist
 
 REM 執行打包
 echo 🔨 開始打包...
-pyinstaller raceshot_uploader.spec --clean
+pyinstaller raceshot_uploader.spec --clean --noconfirm
 
 REM 檢查結果
 if exist "dist\運動拍檔上傳工具.exe" (
