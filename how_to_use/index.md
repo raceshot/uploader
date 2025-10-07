@@ -12,7 +12,7 @@
 
 請參考下圖對照說明
 
-![image](https://github.com/raceshot/uploader/how_to_use/image/01.jpg)
+![image](/how_to_use/image/01.jpg)
 
 1. API Token：這是作為驗證您的帳號使用，為必填選項。
  * 請至攝影師後台->[API Token 管理](https://raceshot.app/photographer/api-token)
@@ -29,7 +29,7 @@
 
 請參考下圖對照說明
 
-![image](https://github.com/raceshot/uploader/how_to_use/image/02.jpg)
+![image](/how_to_use/image/02.jpg)
 
 1. 併發數：一次上傳的並行數量，預設為 20，若您的電腦或網速較不理想，請降低該數值。
 2. 批次大小：單次上傳的相片樟樹，建議總量不要超過 10mb 避免出錯，若不確定請維持 1。
