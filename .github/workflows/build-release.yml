@@ -1,0 +1,104 @@
+name: Build Multi-Platform Executables
+
+on:
+  push:
+    tags:
+      - 'v*'  # 當推送 v1.0.0 這樣的標籤時觸發
+  workflow_dispatch:  # 允許手動觸發
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: Linux
+            artifact_name: 運動拍檔上傳工具-Linux
+            build_script: build_linux.sh
+          - os: windows-latest
+            platform: Windows
+            artifact_name: 運動拍檔上傳工具-Windows
+            build_script: build_windows.bat
+          - os: macos-latest
+            platform: macOS
+            artifact_name: 運動拍檔上傳工具-macOS
+            build_script: build_macos.sh
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install Pillow
+
+      - name: Build executable (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x ${{ matrix.build_script }}
+          ./${{ matrix.build_script }}
+
+      - name: Build executable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          ${{ matrix.build_script }}
+
+      - name: Package for distribution (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          zip -r ${{ matrix.artifact_name }}.zip 運動拍檔上傳工具.app
+
+      - name: Package for distribution (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd dist
+          tar -czf ${{ matrix.artifact_name }}.tar.gz 運動拍檔上傳工具
+
+      - name: Package for distribution (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd dist
+          Compress-Archive -Path 運動拍檔上傳工具.exe -DestinationPath ${{ matrix.artifact_name }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            dist/${{ matrix.artifact_name }}.zip
+            dist/${{ matrix.artifact_name }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.tar.gz
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
