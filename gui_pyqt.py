@@ -11,10 +11,12 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QProgressBar, QFileDialog,
-    QMessageBox, QGroupBox, QSpinBox
+    QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
 from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+import tempfile
 
 # 匯入核心上傳功能
 from uploader import (
@@ -29,6 +31,152 @@ from uploader import (
     OUTPUT_DIR,
 )
 import requests
+
+
+class MapPickerDialog(QDialog):
+    """地圖選擇對話框 - 允許使用者在地圖上點擊選擇經緯度"""
+    def __init__(self, parent=None, initial_lat=25.0, initial_lon=121.0):
+        super().__init__(parent)
+        self.setWindowTitle("選擇拍攝地點")
+        self.setGeometry(100, 100, 1000, 750)
+        self.latitude = initial_lat
+        self.longitude = initial_lon
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 說明文字
+        info_text = QLabel("💡 提示：在地圖上點擊以選擇拍攝地點，或直接輸入座標")
+        info_text.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 5px;")
+        layout.addWidget(info_text)
+        
+        # 建立地圖
+        self.map_view = QWebEngineView()
+        self.map_view.urlChanged.connect(self.on_url_changed)
+        layout.addWidget(self.map_view)
+        
+        # 座標輸入區
+        coord_layout = QHBoxLayout()
+        coord_layout.addWidget(QLabel("緯度："))
+        self.lat_input = QDoubleSpinBox()
+        self.lat_input.setRange(-90, 90)
+        self.lat_input.setValue(self.latitude)
+        self.lat_input.setDecimals(6)
+        self.lat_input.valueChanged.connect(self.on_coord_changed)
+        coord_layout.addWidget(self.lat_input)
+        
+        coord_layout.addWidget(QLabel("經度："))
+        self.lon_input = QDoubleSpinBox()
+        self.lon_input.setRange(-180, 180)
+        self.lon_input.setValue(self.longitude)
+        self.lon_input.setDecimals(6)
+        self.lon_input.valueChanged.connect(self.on_coord_changed)
+        coord_layout.addWidget(self.lon_input)
+        
+        layout.addLayout(coord_layout)
+        
+        # 顯示選定的座標
+        self.info_label = QLabel(f"選定座標：緯度 {self.latitude:.6f}, 經度 {self.longitude:.6f}")
+        self.info_label.setStyleSheet("font-weight: bold; color: #2196F3;")
+        layout.addWidget(self.info_label)
+        
+        # 確認按鈕
+        button_layout = QHBoxLayout()
+        confirm_btn = QPushButton("✅ 確認")
+        confirm_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("❌ 取消")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(confirm_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        self.load_map()
+        
+    def on_coord_changed(self):
+        """座標輸入框改變時更新"""
+        self.latitude = self.lat_input.value()
+        self.longitude = self.lon_input.value()
+        self.info_label.setText(f"選定座標：緯度 {self.latitude:.6f}, 經度 {self.longitude:.6f}")
+        self.load_map()
+        
+    def load_map(self):
+        """載入互動式地圖"""
+        # 建立 HTML 內容，使用 Leaflet 庫
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+            <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+            <style>
+                body {{ margin: 0; padding: 0; }}
+                #map {{ position: absolute; top: 0; bottom: 0; width: 100%; }}
+            </style>
+        </head>
+        <body>
+            <div id="map"></div>
+            <script>
+                setTimeout(function() {{
+                    var map = L.map('map').setView([{self.latitude}, {self.longitude}], 13);
+                    L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+                        attribution: '© OpenStreetMap contributors',
+                        maxZoom: 19
+                    }}).addTo(map);
+                    
+                    var marker = L.marker([{self.latitude}, {self.longitude}]).addTo(map);
+                    marker.bindPopup('拍攝地點<br>緯度: {self.latitude:.6f}<br>經度: {self.longitude:.6f}');
+                    
+                    // 點擊地圖更新座標
+                    map.on('click', function(e) {{
+                        var lat = parseFloat(e.latlng.lat.toFixed(6));
+                        var lng = parseFloat(e.latlng.lng.toFixed(6));
+                        marker.setLatLng([lat, lng]);
+                        marker.setPopupContent('拍攝地點<br>緯度: ' + lat + '<br>經度: ' + lng);
+                        marker.openPopup();
+                        
+                        // 通過 window.location.hash 將座標傳回 Python
+                        window.location.hash = 'lat=' + lat + '&lng=' + lng;
+                    }});
+                }}, 500);
+            </script>
+        </body>
+        </html>
+        """
+        
+        # 直接使用 setHtml 方法設定內容
+        self.map_view.setHtml(html_content)
+    
+    def on_url_changed(self, url):
+        """監聽 URL 變化以獲取地圖點擊的座標"""
+        url_str = url.toString()
+        if 'lat=' in url_str and 'lng=' in url_str:
+            try:
+                # 解析 URL 中的座標
+                hash_part = url_str.split('#')[1] if '#' in url_str else ''
+                if hash_part:
+                    params = dict(param.split('=') for param in hash_part.split('&'))
+                    lat = float(params.get('lat', self.latitude))
+                    lng = float(params.get('lng', self.longitude))
+                    
+                    # 更新座標
+                    self.latitude = lat
+                    self.longitude = lng
+                    self.lat_input.blockSignals(True)
+                    self.lon_input.blockSignals(True)
+                    self.lat_input.setValue(lat)
+                    self.lon_input.setValue(lng)
+                    self.lat_input.blockSignals(False)
+                    self.lon_input.blockSignals(False)
+                    self.info_label.setText(f"選定座標：緯度 {self.latitude:.6f}, 經度 {self.longitude:.6f}")
+            except Exception as e:
+                pass
+        
+    def get_coordinates(self):
+        """取得選定的座標"""
+        return self.latitude, self.longitude
 
 
 class UploadWorker(QThread):
@@ -53,6 +201,8 @@ class UploadWorker(QThread):
             location = self.params['location']
             price = self.params['price']
             bib_number = self.params.get('bib_number')
+            longitude = self.params.get('longitude')
+            latitude = self.params.get('latitude')
             concurrency = self.params.get('concurrency', 1)
             batch_size = self.params.get('batch_size', 1)
             timeout = self.params.get('timeout', 30.0)
@@ -113,6 +263,8 @@ class UploadWorker(QThread):
                         timeout=timeout,
                         max_retries=3,
                         retry_backoff=1.5,
+                        longitude=longitude,
+                        latitude=latitude,
                     )
                     results.append(result)
                     
@@ -144,6 +296,8 @@ class UploadWorker(QThread):
                         timeout=timeout,
                         max_retries=3,
                         retry_backoff=1.5,
+                        longitude=longitude,
+                        latitude=latitude,
                     )
                 
                 with ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -283,6 +437,32 @@ class RaceshotUploaderGUI(QMainWindow):
         self.location_entry.setPlaceholderText("例如：終點線")
         self.location_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
         params_layout.addWidget(self.location_entry, row, 1, 1, 2)
+        row += 1
+        
+        # 經緯度選擇
+        params_layout.addWidget(QLabel("經度"), row, 0)
+        self.longitude_entry = QDoubleSpinBox()
+        self.longitude_entry.setRange(-180, 180)
+        self.longitude_entry.setValue(121.0)
+        self.longitude_entry.setDecimals(6)
+        self.longitude_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
+        params_layout.addWidget(self.longitude_entry, row, 1)
+        
+        params_layout.addWidget(QLabel("緯度"), row, 2)
+        self.latitude_entry = QDoubleSpinBox()
+        self.latitude_entry.setRange(-90, 90)
+        self.latitude_entry.setValue(25.0)
+        self.latitude_entry.setDecimals(6)
+        self.latitude_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
+        params_layout.addWidget(self.latitude_entry, row, 3)
+        row += 1
+        
+        # 地圖選擇按鈕
+        params_layout.addWidget(QLabel(""), row, 0)
+        map_btn = QPushButton("🗺️ 在地圖上選擇")
+        map_btn.clicked.connect(self.open_map_picker)
+        map_btn.setStyleSheet("padding: 8px 20px; background-color: #4CAF50; color: white; border: 1px solid #45a049; border-radius: 4px;")
+        params_layout.addWidget(map_btn, row, 1, 1, 2)
         row += 1
         
         # 價格與號碼布
@@ -433,6 +613,10 @@ class RaceshotUploaderGUI(QMainWindow):
                     self.price_entry.setValue(config['price'])
                 if 'bib_number' in config:
                     self.bib_entry.setText(config['bib_number'])
+                if 'longitude' in config:
+                    self.longitude_entry.setValue(config['longitude'])
+                if 'latitude' in config:
+                    self.latitude_entry.setValue(config['latitude'])
                 if 'concurrency' in config:
                     self.concurrency_entry.setValue(config['concurrency'])
                 if 'batch_size' in config:
@@ -455,6 +639,8 @@ class RaceshotUploaderGUI(QMainWindow):
                 'location': self.location_entry.text().strip(),
                 'price': self.price_entry.value(),
                 'bib_number': self.bib_entry.text().strip(),
+                'longitude': self.longitude_entry.value(),
+                'latitude': self.latitude_entry.value(),
                 'concurrency': self.concurrency_entry.value(),
                 'batch_size': self.batch_size_entry.value(),
                 'timeout': self.timeout_entry.value(),
@@ -472,6 +658,19 @@ class RaceshotUploaderGUI(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "選擇圖片資料夾")
         if folder:
             self.folder_entry.setText(folder)
+    
+    def open_map_picker(self):
+        """打開地圖選擇對話框"""
+        dialog = MapPickerDialog(
+            self,
+            initial_lat=self.latitude_entry.value(),
+            initial_lon=self.longitude_entry.value()
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            lat, lon = dialog.get_coordinates()
+            self.latitude_entry.setValue(lat)
+            self.longitude_entry.setValue(lon)
+            self.log(f"✅ 已選擇座標：緯度 {lat:.6f}, 經度 {lon:.6f}")
             
     def log(self, message):
         self.log_text.append(message)
@@ -517,6 +716,8 @@ class RaceshotUploaderGUI(QMainWindow):
             'location': self.location_entry.text().strip(),
             'price': self.price_entry.value(),
             'bib_number': self.bib_entry.text().strip() or None,
+            'longitude': self.longitude_entry.value() if self.longitude_entry.value() != 0 else None,
+            'latitude': self.latitude_entry.value() if self.latitude_entry.value() != 0 else None,
             'concurrency': self.concurrency_entry.value(),
             'batch_size': self.batch_size_entry.value(),
             'timeout': float(self.timeout_entry.value()),

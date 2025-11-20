@@ -9,6 +9,8 @@
   - `bibNumber`: 號碼布號碼 (可選)
   - `location`: 拍攝地點 (必填)
   - `price`: 價格 (必填，預設 30)
+  - `longitude`: 經度 (可選)
+  - `latitude`: 緯度 (可選)
 
 ## 安裝步驟
 
@@ -34,6 +36,8 @@ python3 uploader.py --dir <圖片資料夾> \
   --location <拍攝地點> \
   [--price <價格，預設30>] \
   [--bib-number <號碼布>] \
+  [--longitude <經度>] \
+  [--latitude <緯度>] \
   [--token <API Token，否則讀取環境變數>] \
   [--max-retries <重試次數，預設3>] \
   [--retry-backoff <重試退避係數，預設1.5>] \
@@ -70,6 +74,16 @@ python3 uploader.py --dir ./images \
   --dry-run
 ```
 
+```bash
+# 上傳時帶入經緯度資訊
+python3 uploader.py --dir ./images \
+  --event-id evt_2025_09_10 \
+  --location "Finish Line" \
+  --latitude 25.033611 \
+  --longitude 121.565000 \
+  --token "YOUR_TOKEN"
+```
+
 ### 使用 .env 設定變數
 
 支援自動載入專案根目錄的 `.env`，或使用 `--env-file` 指定路徑。最常見的是在 `.env` 放入 Token：
@@ -77,6 +91,8 @@ python3 uploader.py --dir ./images \
 ```dotenv
 # .env 範例
 RACESHOT_API_TOKEN=YOUR_API_TOKEN
+RACESHOT_LONGITUDE=121.565000
+RACESHOT_LATITUDE=25.033611
 ```
 
 執行時會自動讀取當前目錄的 `.env`；如需指定其他路徑：
@@ -89,7 +105,7 @@ python3 uploader.py --dir ./images \
 ```
 
 注意：
-- 目前 `.env` 主要用於提供 `RACESHOT_API_TOKEN`。
+- `.env` 可用於提供 `RACESHOT_API_TOKEN`、`RACESHOT_LONGITUDE` 和 `RACESHOT_LATITUDE`。
 - 指令列參數若有提供，會優先於環境變數。
 
 ## 輸出檔案
@@ -104,11 +120,24 @@ python3 uploader.py --dir ./images \
 
 - `.jpg`, `.jpeg`, `.png`
 
+## GUI 介面功能
+
+### 地圖選擇功能
+- 點擊「🗺️ 在地圖上選擇」按鈕打開互動式地圖
+- 在地圖上點擊以選擇拍攝地點座標
+- 支持直接輸入經度和緯度數值
+- 座標會自動保存到配置檔案
+
+### 配置保存
+- 所有設定（包括經緯度）會自動保存
+- 下次啟動時自動載入上次的設定
+
 ## 注意事項與最佳實務
 
 - 遇到網路/伺服器錯誤（5xx/429 或連線逾時）會自動重試，次數與退避可調整。
 - 若後端回傳「已重複上傳」等錯誤，會記錄於 `failure_list.txt`，以便後續檢查。
 - 建議先使用 `--dry-run` 檢查目錄掃描是否正確，再正式上傳。
+- 地圖功能需要網際網路連線以載入 OpenStreetMap 瓦片和 Leaflet 庫。
 
 ## 疑難排解
 

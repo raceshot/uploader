@@ -103,6 +103,8 @@ def parseArgs(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--concurrency", dest="concurrency", type=int, default=None, help="同時上傳的工作執行緒數（可用環境變數 RACESHOT_CONCURRENCY；預設 1）")
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=None, help="單次請求上傳的圖片數量（可用環境變數 RACESHOT_BATCH_SIZE；預設 1）")
     parser.add_argument("--reupload-failures", dest="reupload_failures", action="store_true", help="讀取 output/failure_list.txt 並僅重新上傳這些失敗的檔案")
+    parser.add_argument("--longitude", dest="longitude", type=float, default=None, help="經度（可用環境變數 RACESHOT_LONGITUDE）")
+    parser.add_argument("--latitude", dest="latitude", type=float, default=None, help="緯度（可用環境變數 RACESHOT_LATITUDE）")
     return parser.parse_args(argv)
 
 
@@ -219,6 +221,8 @@ def uploadSingleImage(
     timeout: float,
     max_retries: int,
     retry_backoff: float,
+    longitude: Optional[float] = None,
+    latitude: Optional[float] = None,
 ) -> UploadResult:
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -229,6 +233,10 @@ def uploadSingleImage(
     }
     if bib_number:
         form_data["bibNumber"] = str(bib_number)
+    if longitude is not None:
+        form_data["longitude"] = str(longitude)
+    if latitude is not None:
+        form_data["latitude"] = str(latitude)
 
     images_field = [buildMultipart(file_path)]
 
@@ -350,6 +358,8 @@ def uploadImagesBatch(
     timeout: float,
     max_retries: int,
     retry_backoff: float,
+    longitude: Optional[float] = None,
+    latitude: Optional[float] = None,
 ) -> List[UploadResult]:
     """一次上傳多張圖片（同一請求），回傳逐檔結果清單。"""
     headers = {"Authorization": f"Bearer {token}"}
@@ -360,6 +370,10 @@ def uploadImagesBatch(
     }
     if bib_number:
         form_data["bibNumber"] = str(bib_number)
+    if longitude is not None:
+        form_data["longitude"] = str(longitude)
+    if latitude is not None:
+        form_data["latitude"] = str(latitude)
 
     files_field: List[Tuple[str, Tuple[str, bytes, Optional[str]]]] = []
     for p in file_paths:
@@ -642,6 +656,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     env_dry_run = os.getenv("RACESHOT_DRY_RUN")
     env_concurrency = os.getenv("RACESHOT_CONCURRENCY")
     env_batch_size = os.getenv("RACESHOT_BATCH_SIZE")
+    env_longitude = os.getenv("RACESHOT_LONGITUDE")
+    env_latitude = os.getenv("RACESHOT_LATITUDE")
 
     directory = args.directory or env_dir
     event_id = args.event_id or env_event_id
@@ -690,6 +706,25 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     dry_run_eff = args.dry_run if args.dry_run else (parseBoolEnv(env_dry_run) or False)
     bib_number = args.bib_number or env_bib
+    
+    # 解析經緯度
+    longitude_eff: Optional[float] = None
+    if args.longitude is not None:
+        longitude_eff = float(args.longitude)
+    elif env_longitude is not None:
+        try:
+            longitude_eff = float(env_longitude)
+        except Exception:
+            logging.warning(f"RACESHOT_LONGITUDE 無法解析為浮點數：{env_longitude!r}")
+    
+    latitude_eff: Optional[float] = None
+    if args.latitude is not None:
+        latitude_eff = float(args.latitude)
+    elif env_latitude is not None:
+        try:
+            latitude_eff = float(env_latitude)
+        except Exception:
+            logging.warning(f"RACESHOT_LATITUDE 無法解析為浮點數：{env_latitude!r}")
     # 解析併發與批次
     if args.concurrency is not None:
         concurrency_eff = max(1, int(args.concurrency))
@@ -771,6 +806,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 timeout=float(timeout_eff),
                 max_retries=int(max_retries_eff),
                 retry_backoff=float(retry_backoff_eff),
+                longitude=longitude_eff,
+                latitude=latitude_eff,
             )
             results.append(result)
             # 逐檔即時寫入
@@ -793,6 +830,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                 timeout=float(timeout_eff),
                 max_retries=int(max_retries_eff),
                 retry_backoff=float(retry_backoff_eff),
+                longitude=longitude_eff,
+                latitude=latitude_eff,
             )
 
         with ThreadPoolExecutor(max_workers=concurrency_eff) as executor:

@@ -3,6 +3,7 @@ python-dotenv>=1.0.1,<2.0.0
 
 # GUI 介面（PyQt6 - 跨平台穩定）
 PyQt6>=6.6.0
+PyQt6-WebEngine>=6.6.0
 
 # 打包工具（開發用）
 pyinstaller>=6.0.0
