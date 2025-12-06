@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-API_ENDPOINT = "https://api.raceshot.app/api/photographer/upload"
+API_ENDPOINT = "https://api.raceshot.app/api/v1/photographer/upload"
 DEFAULT_PRICE = 30
 
 # 輸出目錄：使用者家目錄（避免打包後的唯讀問題）

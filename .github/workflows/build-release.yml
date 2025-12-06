@@ -95,4 +95,5 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          body: "使用說明: https://github.com/raceshot/uploader/blob/main/how_to_use/index.md"
           fail_on_unmatched_files: false
