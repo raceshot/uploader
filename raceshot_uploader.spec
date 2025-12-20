@@ -62,8 +62,8 @@ if sys.platform == 'darwin':
         info_plist={
             'NSPrincipalClass': 'NSApplication',
             'NSHighResolutionCapable': 'True',
-            'CFBundleShortVersionString': '1.0.0',
-            'CFBundleVersion': '1.0.0',
+            'CFBundleShortVersionString': '1.1.2',
+            'CFBundleVersion': '1.1.2',
             'CFBundleName': '運動拍檔上傳工具',
             'CFBundleDisplayName': '運動拍檔上傳工具',
             'LSMinimumSystemVersion': '10.13.0',
