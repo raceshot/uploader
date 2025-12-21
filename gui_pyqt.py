@@ -211,15 +211,20 @@ class UploadWorker(QThread):
             timeout = self.params.get('timeout', 30.0)
             reupload_mode = self.params.get('reupload_mode', False)
             
-            if reupload_mode:
-                self.log_signal.emit(f"📂 正在讀取失敗清單並搜尋檔案...")
-                files = collect_failures_to_reupload(folder)
-            else:
-                self.log_signal.emit(f"📂 掃描資料夾：{folder}")
-                files = collectImageFiles(folder)
+            try:
+                if reupload_mode:
+                    self.log_signal.emit(f"📂 正在讀取失敗清單並搜尋檔案...")
+                    files = collect_failures_to_reupload(folder)
+                else:
+                    self.log_signal.emit(f"📂 掃描資料夾：{folder}")
+                    files = collectImageFiles(folder)
             
-            if not files:
-                self.log_signal.emit("⚠️ 找不到任何圖片檔案")
+                if not files:
+                    self.log_signal.emit("⚠️ 找不到任何圖片檔案，或掃描過程發生錯誤。")
+                    self.finished_signal.emit(0, 0)
+                    return
+            except Exception as e:
+                self.log_signal.emit(f"❌ 掃描資料夾時發生嚴重錯誤：{e}")
                 self.finished_signal.emit(0, 0)
                 return
                 

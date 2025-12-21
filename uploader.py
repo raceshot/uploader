@@ -139,11 +139,26 @@ def collectImageFiles(root_dir: Path) -> List[Path]:
         sys.exit(1)
 
     files: List[Path] = []
-    for path in root_dir.rglob("*"):
-        if path.is_file():
-            ext = path.suffix.lower()
-            if ext in ALLOWED_EXTENSIONS:
-                files.append(path)
+    try:
+        # 使用 rglob 掃描
+        for path in root_dir.rglob("*"):
+            try:
+                # 忽略 . 開頭的 hidden files
+                if path.name.startswith("."):
+                    continue
+                if path.is_file():
+                    ext = path.suffix.lower()
+                    if ext in ALLOWED_EXTENSIONS:
+                        files.append(path)
+            except OSError as e:
+                logging.warning(f"無法存取檔案（略過）：{path} - {e}")
+                continue
+    except OSError as e:
+        logging.error(f"掃描資料夾時發生 I/O 錯誤：{e}")
+        # 若整個資料夾讀取失敗，可能還是要讓使用者知道，但至少不要 crash 得太難看，
+        # 或者視為已找到的部分檔案繼續做。
+        # 這裡選擇僅記錄錯誤，回傳已找到的。
+
     files.sort()
     if not files:
         logging.warning("找不到任何符合的圖片檔案。允許的副檔名：" + ", ".join(sorted(ALLOWED_EXTENSIONS)))
@@ -649,24 +664,29 @@ def collect_failures_to_reupload(root_dir: Path) -> List[Path]:
     count_by_name = 0
 
     for line in lines:
-        p = Path(line)
-        if p.is_absolute() and p.exists():
-            files_to_reupload.append(p)
-            count_by_path += 1
-        else:
-            # 視為檔名（舊格式或相對路徑）
-            if name_map is None:
-                name_map = get_name_map()
-            
-            # 使用檔名匹配
-            fname = p.name
-            if fname in name_map:
-                # 將所有同名檔案都加入重試，由後續的 Signature 機制去過濾重複
-                for match_p in name_map[fname]:
-                    files_to_reupload.append(match_p)
-                count_by_name += 1
+        try:
+            p = Path(line)
+            # 檢查路徑是否存在（可能會引發 OSError）
+            if p.is_absolute() and p.exists():
+                files_to_reupload.append(p)
+                count_by_path += 1
             else:
-                logging.warning(f"找不到檔案（既非絕對路徑，也無同名檔案）：{line}")
+                # 視為檔名（舊格式或相對路徑）
+                if name_map is None:
+                    name_map = get_name_map()
+                
+                # 使用檔名匹配
+                fname = p.name
+                if fname in name_map:
+                    # 將所有同名檔案都加入重試，由後續的 Signature 機制去過濾重複
+                    for match_p in name_map[fname]:
+                        files_to_reupload.append(match_p)
+                    count_by_name += 1
+                else:
+                    logging.warning(f"找不到檔案（既非絕對路徑，也無同名檔案）：{line}")
+        except OSError as e:
+            logging.warning(f"處理失敗清單項目時發生錯誤（略過）：{line} - {e}")
+            continue
 
     # 去重
     unique_files = list(set(files_to_reupload))
