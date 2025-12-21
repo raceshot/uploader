@@ -21,6 +21,7 @@ import tempfile
 # 匯入核心上傳功能
 from uploader import (
     collectImageFiles,
+    collect_failures_to_reupload,
     uploadSingleImage,
     uploadImagesBatch,
     init_results_files,
@@ -29,6 +30,8 @@ from uploader import (
     chunked,
     UploadResult,
     OUTPUT_DIR,
+    getFileSignature,
+    FAILURE_LIST,
 )
 import requests
 
@@ -206,9 +209,14 @@ class UploadWorker(QThread):
             concurrency = self.params.get('concurrency', 1)
             batch_size = self.params.get('batch_size', 1)
             timeout = self.params.get('timeout', 30.0)
+            reupload_mode = self.params.get('reupload_mode', False)
             
-            self.log_signal.emit(f"📂 掃描資料夾：{folder}")
-            files = collectImageFiles(folder)
+            if reupload_mode:
+                self.log_signal.emit(f"📂 正在讀取失敗清單並搜尋檔案...")
+                files = collect_failures_to_reupload(folder)
+            else:
+                self.log_signal.emit(f"📂 掃描資料夾：{folder}")
+                files = collectImageFiles(folder)
             
             if not files:
                 self.log_signal.emit("⚠️ 找不到任何圖片檔案")
@@ -220,14 +228,27 @@ class UploadWorker(QThread):
             # 初始化輸出檔案
             init_results_files()
             
-            # 讀取歷史紀錄並過濾
+            # 讀取歷史紀錄並過濾 (使用 Signature)
             history_keys = read_history_keys(event_id)
-            before_count = len(files)
-            files = [p for p in files if (str(p.resolve()), str(event_id)) not in history_keys]
-            skipped = before_count - len(files)
+            
+            final_files = []
+            skipped = 0
+            if not history_keys:
+                final_files = files
+            else:
+                self.log_signal.emit("🔍 比對檔案特徵值中...")
+                for p in files:
+                    # 若是重試模式，通常我們希望即使歷史有紀錄(可能上次標記失敗但實際成功?)也要小心
+                    # 但原則上：只要歷史有紀錄且成功，就跳過
+                    if (getFileSignature(p), str(event_id)) in history_keys:
+                        skipped += 1
+                    else:
+                        final_files.append(p)
             
             if skipped > 0:
-                self.log_signal.emit(f"⏭️ 跳過 {skipped} 張已上傳的檔案")
+                self.log_signal.emit(f"⏭️ 跳過 {skipped} 張已上傳的檔案 (重複特徵值)")
+            
+            files = final_files
                 
             if not files:
                 self.log_signal.emit("✅ 所有檔案都已上傳過")
@@ -591,6 +612,26 @@ class RaceshotUploaderGUI(QMainWindow):
         """)
         button_layout.addWidget(clear_log_btn)
         
+        # 新增一行：重試失敗按鈕
+        retry_layout = QHBoxLayout()
+        self.retry_btn = QPushButton("🔄 一鍵重新上傳失敗檔案")
+        self.retry_btn.clicked.connect(self.retry_failures)
+        self.retry_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FF9800;
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #F57C00;
+            }
+        """)
+        retry_layout.addWidget(self.retry_btn)
+        main_layout.addLayout(retry_layout)
+        
         main_layout.addLayout(button_layout)
         
     def load_config(self):
@@ -702,6 +743,15 @@ class RaceshotUploaderGUI(QMainWindow):
         return True
         
     def start_upload(self):
+        self._run_upload(reupload_mode=False)
+
+    def retry_failures(self):
+        if not (self.app_dir / "output" / "failure_list.txt").exists():
+            QMessageBox.warning(self, "提示", "找不到失敗清單檔案，無法執行重試。")
+            return
+        self._run_upload(reupload_mode=True)
+
+    def _run_upload(self, reupload_mode=False):
         if not self.validate_inputs():
             return
         
@@ -721,13 +771,16 @@ class RaceshotUploaderGUI(QMainWindow):
             'concurrency': self.concurrency_entry.value(),
             'batch_size': self.batch_size_entry.value(),
             'timeout': float(self.timeout_entry.value()),
+            'reupload_mode': reupload_mode,
         }
         
         # 更新 UI 狀態
         self.start_btn.setEnabled(False)
+        self.retry_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.progress_bar.setValue(0)
-        self.progress_label.setText("準備上傳...")
+        mode_text = "重試失敗檔案" if reupload_mode else "上傳"
+        self.progress_label.setText(f"準備{mode_text}...")
         
         # 啟動工作執行緒
         self.upload_worker = UploadWorker(params)
@@ -747,6 +800,7 @@ class RaceshotUploaderGUI(QMainWindow):
         
     def upload_finished(self, success_count, fail_count):
         self.start_btn.setEnabled(True)
+        self.retry_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         
         QMessageBox.information(

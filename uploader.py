@@ -33,6 +33,7 @@ import requests
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import hashlib
 
 API_ENDPOINT = "https://api.raceshot.app/api/v1/photographer/upload"
 DEFAULT_PRICE = 30
@@ -45,7 +46,7 @@ RESULT_CSV = OUTPUT_DIR / "upload_results.csv"
 SUCCESS_LIST = OUTPUT_DIR / "success_list.txt"
 FAILURE_LIST = OUTPUT_DIR / "failure_list.txt"
 LOG_FILE = OUTPUT_DIR / "upload.log"
-HISTORY_CSV = OUTPUT_DIR / "upload_history.csv"
+HISTORY_CSV = OUTPUT_DIR / "upload_history_v2.csv"
 WRITE_LOCK = threading.Lock()
 
 # 允許的圖片副檔名（小寫）
@@ -61,6 +62,7 @@ class UploadResult:
     error: Optional[str] = None
     status_code: Optional[int] = None
     file_path: Optional[str] = None  # 絕對路徑，供歷史紀錄使用
+    signature: Optional[str] = None  # 檔案特徵值
 
 
 def setupLogging() -> None:
@@ -152,6 +154,26 @@ def collectImageFiles(root_dir: Path) -> List[Path]:
 def guessMimeType(file_path: Path) -> Optional[str]:
     mime, _ = mimetypes.guess_type(str(file_path))
     return mime
+
+
+def getFileSignature(path: Path) -> str:
+    """計算檔案特徵值：Hash(Size + Mtime + First 4KB)"""
+    try:
+        stat = path.stat()
+        file_size = stat.st_size
+        mtime = stat.st_mtime
+        
+        with open(path, "rb") as f:
+            head = f.read(4096)
+        
+        h = hashlib.md5()
+        h.update(str(file_size).encode())
+        h.update(str(mtime).encode())
+        h.update(head)
+        return h.hexdigest()
+    except Exception as e:
+        logging.warning(f"無法計算檔案特徵值 {path}: {e}")
+        return ""
 
 
 def buildMultipart(file_path: Path) -> Tuple[str, Tuple[str, bytes, Optional[str]]]:
@@ -279,6 +301,7 @@ def uploadSingleImage(
                         photo_id=photo_id,
                         status_code=resp.status_code,
                         file_path=str(file_path.resolve()),
+                        signature=getFileSignature(file_path),
                     )
                 else:
                     # 失敗情境：回傳中可能含有 failures 陣列
@@ -297,6 +320,7 @@ def uploadSingleImage(
                                 photo_id=dup_pid,
                                 status_code=resp.status_code,
                                 file_path=str(file_path.resolve()),
+                                signature=getFileSignature(file_path),
                             )
                     else:
                         err_msg = message or f"HTTP {resp.status_code}"
@@ -310,6 +334,7 @@ def uploadSingleImage(
                             error=err_msg,
                             status_code=resp.status_code,
                             file_path=str(file_path.resolve()),
+                            signature=getFileSignature(file_path),
                         )
                     last_error = err_msg
             else:
@@ -345,6 +370,7 @@ def uploadSingleImage(
             error=last_error,
             status_code=last_status,
             file_path=str(file_path.resolve()),
+            signature=getFileSignature(file_path),
         )
 
 
@@ -403,7 +429,13 @@ def uploadImagesBatch(
 
             # 預設全部標為失敗，若成功或判定為重複則覆寫
             results: List[UploadResult] = [
-                UploadResult(file_name=p.name, success=False, message="上傳失敗", file_path=str(p.resolve()))
+                UploadResult(
+                    file_name=p.name,
+                    success=False,
+                    message="上傳失敗",
+                    file_path=str(p.resolve()),
+                    signature=getFileSignature(p)
+                )
                 for p in file_paths
             ]
 
@@ -510,6 +542,7 @@ def uploadImagesBatch(
                 error=last_error,
                 status_code=last_status,
                 file_path=str(p.resolve()),
+                signature=getFileSignature(p),
             )
             for p in file_paths
         ]
@@ -536,7 +569,7 @@ def init_results_files() -> None:
     if not HISTORY_CSV.exists():
         with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["file_path", "event_id", "location", "photo_id"])  # 基本歷史紀錄
+            writer.writerow(["signature", "event_id", "photo_id", "file_path", "uploaded_at"])
         logging.info(f"建立歷史紀錄 CSV：{HISTORY_CSV}")
 
 
@@ -557,55 +590,92 @@ def append_results(results: List[UploadResult], event_id: str, location: str) ->
                     r.status_code or "",
                 ])
 
-        # 成功/失敗逐列追加
+        # 成功/失敗逐列追加（修改：記錄絕對路徑以便精準重試）
         if results:
             with open(SUCCESS_LIST, "a", encoding="utf-8") as fsucc, open(FAILURE_LIST, "a", encoding="utf-8") as ffail:
                 for r in results:
+                    path_to_write = r.file_path or r.file_name
                     if r.success:
-                        fsucc.write(r.file_name + "\n")
+                        fsucc.write(path_to_write + "\n")
                     else:
-                        ffail.write(r.file_name + "\n")
+                        ffail.write(path_to_write + "\n")
 
         # 歷史紀錄：僅針對成功
         with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
             for r in results:
-                if r.success:
-                    writer.writerow([r.file_path or "", event_id, location, r.photo_id or ""])    
+                if r.success and r.signature:
+                    writer.writerow([
+                        r.signature,
+                        event_id,
+                        r.photo_id or "",
+                        r.file_path or "",
+                        timestamp
+                    ])
 
 
 def collect_failures_to_reupload(root_dir: Path) -> List[Path]:
-    """讀取 failure_list.txt 並從 root_dir 找出對應的檔案路徑。"""
+    """讀取 failure_list.txt 並判斷是路徑還是檔名，回傳待上傳清單。"""
     if not FAILURE_LIST.exists():
         logging.error(f"找不到失敗清單檔案：{FAILURE_LIST}")
         sys.exit(1)
 
     with open(FAILURE_LIST, "r", encoding="utf-8") as f:
-        failed_filenames = {line.strip() for line in f if line.strip()}
+        lines = [line.strip() for line in f if line.strip()]
 
-    if not failed_filenames:
+    if not lines:
         logging.info("失敗清單是空的，沒有需要重新上傳的檔案。")
         return []
 
-    logging.info(f"從 {root_dir} 搜尋 {len(failed_filenames)} 個失敗的檔案…")
-    all_image_paths = collectImageFiles(root_dir)
-    path_map = {p.name: p for p in all_image_paths}
-
     files_to_reupload: List[Path] = []
-    found_count = 0
-    for filename in sorted(list(failed_filenames)):
-        if filename in path_map:
-            files_to_reupload.append(path_map[filename])
-            found_count += 1
-        else:
-            logging.warning(f"在來源資料夾中找不到失敗的檔案：{filename}")
+    
+    # 策略：
+    # 1. 如果這一行看起來像絕對路徑且檔案存在，直接使用
+    # 2. 如果只是檔名，則掃描 root_dir 尋找對應（可能會有多個同名檔案，建議全部加入嘗試上傳，或是僅第一個）
+    #    由於舊版邏輯有缺陷（同名覆蓋），這裡改為：若為檔名，則收集所有同名檔案
 
-    logging.info(f"共找到 {found_count} / {len(failed_filenames)} 個待重新上傳的檔案。")
-    return files_to_reupload
+    # 先掃描 root_dir 建立檔名索引（僅在有需要時才做，優化效能）
+    name_map: Optional[dict[str, List[Path]]] = None
+
+    def get_name_map() -> dict[str, List[Path]]:
+        logging.info(f"正在掃描 {root_dir} 以匹配失敗的檔名…")
+        m = {}
+        for p in collectImageFiles(root_dir):
+            m.setdefault(p.name, []).append(p)
+        return m
+
+    count_by_path = 0
+    count_by_name = 0
+
+    for line in lines:
+        p = Path(line)
+        if p.is_absolute() and p.exists():
+            files_to_reupload.append(p)
+            count_by_path += 1
+        else:
+            # 視為檔名（舊格式或相對路徑）
+            if name_map is None:
+                name_map = get_name_map()
+            
+            # 使用檔名匹配
+            fname = p.name
+            if fname in name_map:
+                # 將所有同名檔案都加入重試，由後續的 Signature 機制去過濾重複
+                for match_p in name_map[fname]:
+                    files_to_reupload.append(match_p)
+                count_by_name += 1
+            else:
+                logging.warning(f"找不到檔案（既非絕對路徑，也無同名檔案）：{line}")
+
+    # 去重
+    unique_files = list(set(files_to_reupload))
+    logging.info(f"從失敗清單解析出 {len(unique_files)} 個待重試檔案（路徑匹配: {count_by_path}, 檔名匹配: {count_by_name}）")
+    return unique_files
 
 
 def read_history_keys(event_id: str) -> set:
-    """讀取歷史紀錄，回傳已成功上傳過的 (file_path, event_id) 鍵集合。"""
+    """讀取歷史紀錄，回傳已成功上傳過的 (signature, event_id) 集合。"""
     keys = set()
     if not HISTORY_CSV.exists():
         return keys
@@ -613,12 +683,13 @@ def read_history_keys(event_id: str) -> set:
         with open(HISTORY_CSV, "r", newline="", encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader, None)
+            # csv header: signature, event_id, photo_id, file_path, uploaded_at
             for row in reader:
                 if len(row) >= 2:
-                    fpath = row[0]
+                    sig = row[0]
                     evt = row[1]
                     if evt == str(event_id):
-                        keys.add((fpath, evt))
+                        keys.add((sig, evt))
     except Exception as e:
         logging.warning(f"讀取歷史紀錄失敗：{e}")
     return keys
@@ -776,16 +847,33 @@ def main(argv: Optional[List[str]] = None) -> None:
         files = collectImageFiles(root_dir)
 
     # 讀取歷史紀錄並過濾重複（同一 event_id 下同一檔案絕對路徑視為已上傳）
+    # 讀取歷史紀錄並過濾重複（改用 Signature 檢查）
     init_results_files()
     history_keys = read_history_keys(event_id)
-    before_count = len(files)
-    files = [p for p in files if (str(p.resolve()), str(event_id)) not in history_keys]
-    skipped = before_count - len(files)
-    if skipped > 0:
-        logging.info(f"跳過 {skipped} 張已在歷史紀錄內的檔案（event_id={event_id}）")
+    
+    # 計算並過濾
+    final_files: List[Path] = []
+    skipped_count = 0
+    
+    if not history_keys:
+        final_files = files
+    else:
+        logging.info("正在檢查檔案特徵值以過濾重複…")
+        for p in files:
+            sig = getFileSignature(p)
+            if (sig, str(event_id)) in history_keys:
+                skipped_count += 1
+            else:
+                final_files.append(p)
+    
+    if skipped_count > 0:
+        logging.info(f"跳過 {skipped_count} 張具相同特徵值的已上傳檔案（event_id={event_id}）")
+    
+    files = final_files
+
     if dry_run_eff:
         for p in files:
-            logging.info(f"DRY-RUN 將上傳：{p}")
+            logging.info(f"DRY-RUN 將上傳：{p} (Sig={getFileSignature(p)})")
         logging.info("Dry run 結束，未呼叫 API。")
         return
 
