@@ -30,7 +30,7 @@ from uploader import (
     chunked,
     UploadResult,
     OUTPUT_DIR,
-    getFileSignature,
+    OUTPUT_DIR,
     FAILURE_LIST,
 )
 import requests
@@ -241,17 +241,16 @@ class UploadWorker(QThread):
             if not history_keys:
                 final_files = files
             else:
-                self.log_signal.emit("🔍 比對檔案特徵值中...")
+                self.log_signal.emit("🔍 過濾歷史紀錄中... (利用路徑比對)")
                 for p in files:
-                    # 若是重試模式，通常我們希望即使歷史有紀錄(可能上次標記失敗但實際成功?)也要小心
-                    # 但原則上：只要歷史有紀錄且成功，就跳過
-                    if (getFileSignature(p), str(event_id)) in history_keys:
+                    # 改為使用絕對路徑比對
+                    if (str(p.resolve()), str(event_id)) in history_keys:
                         skipped += 1
                     else:
                         final_files.append(p)
             
             if skipped > 0:
-                self.log_signal.emit(f"⏭️ 跳過 {skipped} 張已上傳的檔案 (重複特徵值)")
+                self.log_signal.emit(f"⏭️ 跳過 {skipped} 張已上傳的檔案 (路徑重複)")
             
             files = final_files
                 

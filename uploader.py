@@ -316,7 +316,7 @@ def uploadSingleImage(
                         photo_id=photo_id,
                         status_code=resp.status_code,
                         file_path=str(file_path.resolve()),
-                        signature=getFileSignature(file_path),
+                        signature="",
                     )
                 else:
                     # 失敗情境：回傳中可能含有 failures 陣列
@@ -335,7 +335,7 @@ def uploadSingleImage(
                                 photo_id=dup_pid,
                                 status_code=resp.status_code,
                                 file_path=str(file_path.resolve()),
-                                signature=getFileSignature(file_path),
+                                signature="",
                             )
                     else:
                         err_msg = message or f"HTTP {resp.status_code}"
@@ -349,7 +349,7 @@ def uploadSingleImage(
                             error=err_msg,
                             status_code=resp.status_code,
                             file_path=str(file_path.resolve()),
-                            signature=getFileSignature(file_path),
+                            signature="",
                         )
                     last_error = err_msg
             else:
@@ -385,7 +385,7 @@ def uploadSingleImage(
             error=last_error,
             status_code=last_status,
             file_path=str(file_path.resolve()),
-            signature=getFileSignature(file_path),
+            signature="",
         )
 
 
@@ -449,7 +449,7 @@ def uploadImagesBatch(
                     success=False,
                     message="上傳失敗",
                     file_path=str(p.resolve()),
-                    signature=getFileSignature(p)
+                    signature=""
                 )
                 for p in file_paths
             ]
@@ -463,20 +463,40 @@ def uploadImagesBatch(
                 # 將失敗項目以 fileName 建立查表
                 failed_by_name: dict[str, str] = {}
                 dup_by_name: dict[str, Optional[str]] = {}
-                unknown_failure_count = 0
+                unmapped_failure_count = 0
+                
+                # 建立一個正規化檔名的對照表 (basename -> list of original names)
+                # 以便處理伺服器可能只回傳 basename 的情況
+                name_map = {}
+                for p in file_paths:
+                    name_map.setdefault(p.name, []).append(p.name)
+
                 for f in failure_items if isinstance(failure_items, list) else []:
                     fn = f.get("fileName") or f.get("filename")
                     err = f.get("error") or message or "上傳失敗"
                     is_dup, dup_pid = isDuplicateFailure(err, f)
+                    
                     if fn:
+                        # 嘗試精確比對
                         if is_dup:
                             dup_by_name[fn] = dup_pid
                         else:
                             failed_by_name[fn] = err
+                        
+                        # 若原始檔名沒對上，嘗試用 basename 比對
+                        # (有些後端實作可能會去掉路徑)
+                        if fn not in [p.name for p in file_paths]:
+                             # 這裡簡化處理：若 batch 內有同名檔案，可能無法精確區分哪一個失敗
+                             # 但至少標記為失敗
+                            unmapped_failure_count += 1
                     else:
-                        # 無法對應到檔名者
-                        if not is_dup:
-                            unknown_failure_count += 1
+                        # 無檔名的失敗，視為全域變數處理，稍後若還有成功狀態的則強制標記
+                        unmapped_failure_count += 1
+
+                # 邏輯修正：如果 top-level success 為 False，且 failed_by_name 為空 (或不足)，
+                # 則應該將所有「未被標記為重複」的項目都視為失敗。
+                
+                has_global_failure = not success and not failure_items
 
                 # 先標記『已上傳』為成功
                 for r in results:
@@ -485,25 +505,35 @@ def uploadImagesBatch(
                         r.message = "已上傳（視為成功）"
                         r.photo_id = dup_by_name[r.file_name]
 
-                # 再標記真正的失敗
+                # 再標記由 Server 明確指出的失敗
                 for r in results:
                     if r.file_name in failed_by_name:
                         r.success = False
                         r.error = failed_by_name[r.file_name]
                         r.message = message or r.error or "上傳失敗"
+                
+                # 若發生全域失敗 (success=False 且無細節)，則將剩餘看似成功的都標為失敗
+                if has_global_failure:
+                    for r in results:
+                        if r.success and r.file_name not in dup_by_name and not r.error:
+                             r.success = False
+                             r.error = message or "批次上傳失敗（未知原因）"
+                             r.message = r.error
 
-                # 其餘標記為成功（暫無法從回傳對應 file_name 與 photo_id 的關係）
-                for i, r in enumerate(results):
-                    if r.file_name not in failed_by_name and r.file_name not in dup_by_name:
-                        r.success = True
-                        r.message = message or "上傳成功"
-                        r.photo_id = None
+                # 其餘標記為成功
+                for r in results:
+                    # 只有當沒有 error 且尚未被標記成功(如重複)，才設為成功
+                    if r.success == False and r.message == "上傳失敗" and not r.error:
+                        # 這是初始狀態，若沒被標記失敗，則視為成功
+                         r.success = True
+                         r.message = message or "上傳成功"
+                         r.photo_id = None
 
                 # 若回傳有未知的失敗數（沒有 fileName），將尚未標記的成功項目回填為失敗以符合計數
-                if unknown_failure_count > 0:
+                if unmapped_failure_count > 0:
                     patched = 0
                     for r in results:
-                        if patched >= unknown_failure_count:
+                        if patched >= unmapped_failure_count:
                             break
                         if r.success and r.file_name not in dup_by_name:
                             r.success = False
@@ -515,7 +545,9 @@ def uploadImagesBatch(
                 if isinstance(photo_ids, list) and photo_ids:
                     for r in results:
                         if r.success:
-                            r.photo_id = photo_ids[0]
+                            # 避免覆蓋已有的 dup id
+                            if not r.photo_id:
+                                r.photo_id = photo_ids[0]
                             break
 
                 # 記錄日誌
@@ -557,7 +589,7 @@ def uploadImagesBatch(
                 error=last_error,
                 status_code=last_status,
                 file_path=str(p.resolve()),
-                signature=getFileSignature(p),
+                signature="",
             )
             for p in file_paths
         ]
@@ -695,7 +727,7 @@ def collect_failures_to_reupload(root_dir: Path) -> List[Path]:
 
 
 def read_history_keys(event_id: str) -> set:
-    """讀取歷史紀錄，回傳已成功上傳過的 (signature, event_id) 集合。"""
+    """讀取歷史紀錄，回傳已成功上傳過的 (file_path, event_id) 集合。"""
     keys = set()
     if not HISTORY_CSV.exists():
         return keys
@@ -705,11 +737,11 @@ def read_history_keys(event_id: str) -> set:
             header = next(reader, None)
             # csv header: signature, event_id, photo_id, file_path, uploaded_at
             for row in reader:
-                if len(row) >= 2:
-                    sig = row[0]
+                if len(row) >= 4:
                     evt = row[1]
+                    fpath = row[3]
                     if evt == str(event_id):
-                        keys.add((sig, evt))
+                        keys.add((fpath, evt))
     except Exception as e:
         logging.warning(f"讀取歷史紀錄失敗：{e}")
     return keys
