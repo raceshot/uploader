@@ -747,6 +747,46 @@ def read_history_keys(event_id: str) -> set:
     return keys
 
 
+def clear_event_history(event_id: str) -> int:
+    """
+    清除指定 Event ID 的上傳紀錄。
+    回傳清除的筆數。
+    """
+    if not HISTORY_CSV.exists():
+        return 0
+
+    removed_count = 0
+    temp_rows = []
+    
+    with WRITE_LOCK:
+        try:
+            with open(HISTORY_CSV, "r", newline="", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                if header:
+                    temp_rows.append(header)
+                
+                for row in reader:
+                    # csv header: signature, event_id, photo_id, file_path, uploaded_at
+                    # row[1] is event_id
+                    if len(row) >= 2 and row[1] == str(event_id):
+                        removed_count += 1
+                        continue
+                    temp_rows.append(row)
+            
+            # 寫回檔案
+            if removed_count > 0:
+                with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerows(temp_rows)
+                logging.info(f"已清除 Event ID={event_id} 的 {removed_count} 筆歷史紀錄")
+        except Exception as e:
+            logging.error(f"清除歷史紀錄時發生錯誤：{e}")
+            raise e
+
+    return removed_count
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     args = parseArgs(argv)
     setupLogging()

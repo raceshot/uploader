@@ -30,8 +30,8 @@ from uploader import (
     chunked,
     UploadResult,
     OUTPUT_DIR,
-    OUTPUT_DIR,
     FAILURE_LIST,
+    clear_event_history,
 )
 import requests
 
@@ -721,7 +721,24 @@ class RaceshotUploaderGUI(QMainWindow):
         self.log_text.append(message)
         
     def clear_log(self):
-        self.log_text.clear()
+        event_id = self.event_id_entry.text().strip()
+        msg = "確定要清除日誌嗎？"
+        if event_id:
+            msg = f"確定要清除日誌以及活動 ID '{event_id}' 的所有上傳紀錄嗎？\n\n(注意：輸入欄位內容將保留，但已上傳的紀錄將被移除，下次上傳將重新檢查)"
+        
+        reply = QMessageBox.question(self, "清除日誌與紀錄", msg,
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                     QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            self.log_text.clear()
+            if event_id:
+                try:
+                    count = clear_event_history(event_id)
+                    self.log(f"✅ 已清除活動 {event_id} 的 {count} 筆上傳紀錄。")
+                except Exception as e:
+                    self.log(f"❌ 清除紀錄失敗：{e}")
+            self.log("✅ 日誌已清除。")
         
     def validate_inputs(self):
         if not self.token_entry.text().strip():
