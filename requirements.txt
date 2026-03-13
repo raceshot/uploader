@@ -7,3 +7,4 @@ PyQt6-WebEngine>=6.6.0
 
 # 打包工具（開發用）
 pyinstaller>=6.0.0
+Pillow>=10.0.0

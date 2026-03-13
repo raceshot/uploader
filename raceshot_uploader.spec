@@ -53,6 +53,15 @@ exe = EXE(
 
 # macOS 專用：建立 .app bundle
 import sys
+from pathlib import Path
+
+# 讀取版本號
+version = "1.0.0"
+try:
+    version = Path("VERSION").read_text().strip()
+except Exception:
+    pass
+
 if sys.platform == 'darwin':
     app = BUNDLE(
         exe,
@@ -62,8 +71,8 @@ if sys.platform == 'darwin':
         info_plist={
             'NSPrincipalClass': 'NSApplication',
             'NSHighResolutionCapable': 'True',
-            'CFBundleShortVersionString': '1.1.2',
-            'CFBundleVersion': '1.1.2',
+            'CFBundleShortVersionString': version,
+            'CFBundleVersion': version,
             'CFBundleName': '運動拍檔上傳工具',
             'CFBundleDisplayName': '運動拍檔上傳工具',
             'LSMinimumSystemVersion': '10.13.0',

@@ -35,7 +35,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import hashlib
 
-API_ENDPOINT = "https://api.raceshot.app/api/v1/photographer/upload"
+API_BASE = os.getenv("RACESHOT_API_BASE", "https://api.raceshot.app")
+API_ENDPOINT = f"{API_BASE}/api/v1/photographer/upload"
+HOST_API_ENDPOINT = f"{API_BASE}/api/v1/host/albums/upload/photo"
+VERIFY_TOKEN_ENDPOINT = f"{API_BASE}/api/v1/photographer/api/verify"
+LIST_EVENTS_ENDPOINT = f"{API_BASE}/api/v1/photographer/api/events"
 DEFAULT_PRICE = 30
 
 # 輸出目錄：使用者家目錄（避免打包後的唯讀問題）
@@ -87,6 +91,36 @@ def setupLogging() -> None:
     logger.handlers.clear()
     logger.addHandler(ch)
     logger.addHandler(fh)
+
+def verifyToken(token: str, timeout: float = 10.0) -> Tuple[bool, Optional[dict], str]:
+    """呼叫後端驗證 API Token 是否有效"""
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.get(VERIFY_TOKEN_ENDPOINT, headers=headers, timeout=timeout)
+        if resp.status_code == 200:
+            payload = resp.json()
+            if payload.get("valid"):
+                return True, payload.get("user"), "Token 有效"
+            return False, None, payload.get("error", "驗證失敗")
+        else:
+            payload = resp.json() if resp.text else {}
+            return False, None, payload.get("error", f"HTTP {resp.status_code}")
+    except Exception as e:
+        return False, None, f"連線錯誤: {e}"
+
+def listEvents(token: str, timeout: float = 10.0) -> Tuple[bool, List[dict], str]:
+    """呼叫後端獲取可用的活動列表"""
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.get(LIST_EVENTS_ENDPOINT, headers=headers, timeout=timeout)
+        if resp.status_code == 200:
+            payload = resp.json()
+            return True, payload.get("events", []), "Success"
+        else:
+            payload = resp.json() if resp.text else {}
+            return False, [], payload.get("error", f"HTTP {resp.status_code}")
+    except Exception as e:
+        return False, [], f"連線錯誤: {e}"
 
 
 def parseArgs(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -260,11 +294,19 @@ def uploadSingleImage(
     retry_backoff: float,
     longitude: Optional[float] = None,
     latitude: Optional[float] = None,
+    endpoint: Optional[str] = None,
 ) -> UploadResult:
+    target_endpoint = endpoint or API_ENDPOINT
     headers = {"Authorization": f"Bearer {token}"}
 
+    # Ensure the 'org_' prefix is removed if present
+    clean_event_id = str(event_id)
+    if clean_event_id.startswith("org_"):
+        clean_event_id = clean_event_id[4:]
+
     form_data = {
-        "eventId": str(event_id),
+        "eventId": clean_event_id,
+        "album_id": clean_event_id, # Host API specifically looks for album_id
         "location": str(location),
         "price": str(price),
     }
@@ -275,7 +317,12 @@ def uploadSingleImage(
     if latitude is not None:
         form_data["latitude"] = str(latitude)
 
-    images_field = [buildMultipart(file_path)]
+    image_file = buildMultipart(file_path)
+    images_field = [
+        ("file", image_file[1]),
+        ("image", image_file[1]),
+        ("images", image_file[1])
+    ]
 
     attempt = 0
     last_error: Optional[str] = None
@@ -285,7 +332,7 @@ def uploadSingleImage(
         exc: Optional[BaseException] = None
         try:
             resp = session.post(
-                API_ENDPOINT,
+                target_endpoint,
                 headers=headers,
                 data=form_data,
                 files=images_field,
@@ -299,11 +346,13 @@ def uploadSingleImage(
             except Exception:
                 payload = None
 
-            if resp.ok and payload is not None:
+            if payload is not None:
                 # 依照題目回傳格式處理
-                success = bool(payload.get("success"))
-                message = str(payload.get("message", ""))
+                success = bool(payload.get("success")) or payload.get("status") == "success"
+                message = str(payload.get("message") or payload.get("error") or "")
                 photo_ids = payload.get("photoIds") or []
+                if not photo_ids and payload.get("photo_id"):
+                    photo_ids = [payload.get("photo_id")]
                 failure_items = payload.get("failures") or []
 
                 if success:
@@ -319,26 +368,28 @@ def uploadSingleImage(
                         signature="",
                     )
                 else:
-                    # 失敗情境：回傳中可能含有 failures 陣列
-                    err_msg = None
+                    # 失敗情境
+                    is_dup, dup_pid = False, None
                     if isinstance(failure_items, list) and failure_items:
                         f0 = failure_items[0]
-                        # 後端可能傳 error 與 fileName 或 photoId
                         err_msg = f0.get("error") or message or "上傳失敗"
                         is_dup, dup_pid = isDuplicateFailure(err_msg, f0)
-                        if is_dup:
-                            logging.info(f"☑️ 已上傳（視為成功）：{file_path.name}")
-                            return UploadResult(
-                                file_name=file_path.name,
-                                success=True,
-                                message="已上傳（視為成功）",
-                                photo_id=dup_pid,
-                                status_code=resp.status_code,
-                                file_path=str(file_path.resolve()),
-                                signature="",
-                            )
                     else:
                         err_msg = message or f"HTTP {resp.status_code}"
+                        is_dup, dup_pid = isDuplicateFailure(err_msg, payload or {})
+
+                    if is_dup or resp.status_code == 409:
+                        logging.info(f"☑️ 已上傳（視為成功）：{file_path.name}")
+                        return UploadResult(
+                            file_name=file_path.name,
+                            success=True,
+                            message="已上傳（視為成功）",
+                            photo_id=dup_pid or payload.get("photoId") or payload.get("photo_id"),
+                            status_code=resp.status_code,
+                            file_path=str(file_path.resolve()),
+                            signature="",
+                        )
+
                     logging.warning(f"⚠️ 上傳失敗：{file_path.name} - {err_msg}")
                     # 4xx 不重試；但 429 會在 shouldRetry 中允許
                     if not shouldRetry(resp.status_code, None):
@@ -401,11 +452,19 @@ def uploadImagesBatch(
     retry_backoff: float,
     longitude: Optional[float] = None,
     latitude: Optional[float] = None,
+    endpoint: Optional[str] = None,
 ) -> List[UploadResult]:
     """一次上傳多張圖片（同一請求），回傳逐檔結果清單。"""
+    target_endpoint = endpoint or API_ENDPOINT
     headers = {"Authorization": f"Bearer {token}"}
+    # Ensure the 'org_' prefix is removed if present
+    clean_event_id = str(event_id)
+    if clean_event_id.startswith("org_"):
+        clean_event_id = clean_event_id[4:]
+
     form_data = {
-        "eventId": str(event_id),
+        "eventId": clean_event_id,
+        "album_id": clean_event_id,
         "location": str(location),
         "price": str(price),
     }
@@ -418,7 +477,10 @@ def uploadImagesBatch(
 
     files_field: List[Tuple[str, Tuple[str, bytes, Optional[str]]]] = []
     for p in file_paths:
-        files_field.append(buildMultipart(p))
+        file_tuple = buildMultipart(p)
+        files_field.append(("images", file_tuple[1]))
+        files_field.append(("image", file_tuple[1]))
+        files_field.append(("file", file_tuple[1]))
 
     attempt = 0
     last_error: Optional[str] = None
@@ -429,7 +491,7 @@ def uploadImagesBatch(
         exc: Optional[BaseException] = None
         try:
             resp = session.post(
-                API_ENDPOINT,
+                target_endpoint,
                 headers=headers,
                 data=form_data,
                 files=files_field,
@@ -454,10 +516,12 @@ def uploadImagesBatch(
                 for p in file_paths
             ]
 
-            if resp.ok and payload is not None:
-                success = bool(payload.get("success"))
-                message = str(payload.get("message", ""))
+            if payload is not None:
+                success = bool(payload.get("success")) or payload.get("status") == "success"
+                message = str(payload.get("message") or payload.get("error") or "")
                 photo_ids = payload.get("photoIds") or []
+                if not photo_ids and payload.get("photo_id"):
+                    photo_ids = [payload.get("photo_id")]
                 failure_items = payload.get("failures") or []
 
                 # 將失敗項目以 fileName 建立查表

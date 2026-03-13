@@ -11,9 +11,12 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QProgressBar, QFileDialog,
-    QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox
+    QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox, QComboBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
+import webbrowser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 import tempfile
@@ -32,9 +35,48 @@ from uploader import (
     OUTPUT_DIR,
     FAILURE_LIST,
     clear_event_history,
+    API_BASE,
+    verifyToken,
+    listEvents,
+    API_ENDPOINT,
+    HOST_API_ENDPOINT,
 )
 import requests
 
+
+class TokenCallbackHandler(BaseHTTPRequestHandler):
+    gui_app = None
+
+    def log_message(self, format, *args):
+        pass # Suppress logging
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/callback':
+            query = parse_qs(parsed.query)
+            token = query.get('token', [None])[0]
+            if token and self.gui_app:
+                # Trigger signal
+                self.gui_app.token_received_signal.emit(token)
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html; charset=utf-8')
+                self.end_headers()
+                self.wfile.write("<html><head><meta charset='utf-8'></head><body style='text-align: center; vertical-align: middle;'><h1 style='font-size: 24px; margin-top: 50px;'>登入成功！<br>Login Successful!</h1><p>您可以關閉此視窗<br>You can close this window.</p><script>setTimeout(function(){window.close();}, 2000);</script></body></html>".encode('utf-8'))
+            else:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Missing token")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def start_local_server(gui_app):
+    TokenCallbackHandler.gui_app = gui_app
+    server = HTTPServer(('127.0.0.1', 39014), TokenCallbackHandler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.daemon = True
+    thread.start()
+    return server
 
 class MapPickerDialog(QDialog):
     """地圖選擇對話框 - 允許使用者在地圖上點擊選擇經緯度"""
@@ -210,6 +252,7 @@ class UploadWorker(QThread):
             batch_size = self.params.get('batch_size', 1)
             timeout = self.params.get('timeout', 30.0)
             reupload_mode = self.params.get('reupload_mode', False)
+            endpoint = self.params.get('endpoint')
             
             try:
                 if reupload_mode:
@@ -290,6 +333,7 @@ class UploadWorker(QThread):
                         retry_backoff=1.5,
                         longitude=longitude,
                         latitude=latitude,
+                        endpoint=endpoint,
                     )
                     results.append(result)
                     
@@ -323,6 +367,7 @@ class UploadWorker(QThread):
                         retry_backoff=1.5,
                         longitude=longitude,
                         latitude=latitude,
+                        endpoint=endpoint,
                     )
                 
                 with ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -371,10 +416,20 @@ class UploadWorker(QThread):
 
 
 class RaceshotUploaderGUI(QMainWindow):
+    token_received_signal = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.upload_worker = None
+        self.current_token = ""
+        self.events_list = []
         
+        self.token_received_signal.connect(self.on_token_received)
+        try:
+            self.local_server = start_local_server(self)
+        except Exception as e:
+            print(f"Failed to start local server to listen for login callbacks: {e}")
+
         # 設定檔案路徑（使用者家目錄，避免打包後的唯讀問題）
         self.app_dir = Path.home() / ".raceshot_uploader"
         self.app_dir.mkdir(exist_ok=True)
@@ -426,13 +481,16 @@ class RaceshotUploaderGUI(QMainWindow):
         
         row = 0
         
-        # API Token
-        params_layout.addWidget(QLabel("API Token"), row, 0)
-        self.token_entry = QLineEdit()
-        self.token_entry.setEchoMode(QLineEdit.EchoMode.Password)
-        self.token_entry.setPlaceholderText("請輸入 API Token")
-        self.token_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.token_entry, row, 1, 1, 2)
+        # 登入狀態與按鈕
+        params_layout.addWidget(QLabel("帳號登入"), row, 0)
+        self.login_status_label = QLabel("🔴 未登入")
+        self.login_status_label.setStyleSheet("color: red; font-weight: bold; padding: 8px;")
+        params_layout.addWidget(self.login_status_label, row, 1)
+        
+        self.login_btn = QPushButton("🌐 網頁登入")
+        self.login_btn.clicked.connect(self.open_login_web)
+        self.login_btn.setStyleSheet("padding: 8px 10px; background-color: #4CAF50; color: white; border-radius: 4px;")
+        params_layout.addWidget(self.login_btn, row, 2)
         row += 1
         
         # 資料夾選擇
@@ -448,12 +506,17 @@ class RaceshotUploaderGUI(QMainWindow):
         params_layout.addWidget(browse_btn, row, 2)
         row += 1
         
-        # 活動 ID
-        params_layout.addWidget(QLabel("活動 ID"), row, 0)
-        self.event_id_entry = QLineEdit()
-        self.event_id_entry.setPlaceholderText("例如：12345")
-        self.event_id_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.event_id_entry, row, 1, 1, 2)
+        # 活動 ID (改為下拉選單)
+        params_layout.addWidget(QLabel("活動選擇"), row, 0)
+        self.event_combo = QComboBox()
+        self.event_combo.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
+        self.event_combo.setEditable(True)  # 允許手動輸入
+        params_layout.addWidget(self.event_combo, row, 1)
+        
+        self.refresh_events_btn = QPushButton("🔄 更新列表")
+        self.refresh_events_btn.clicked.connect(self.load_events_list)
+        self.refresh_events_btn.setStyleSheet("padding: 8px 10px; background-color: #f0f0f0; border: 1px solid #ccc; border-radius: 4px;")
+        params_layout.addWidget(self.refresh_events_btn, row, 2)
         row += 1
         
         # 拍攝地點
@@ -464,30 +527,34 @@ class RaceshotUploaderGUI(QMainWindow):
         params_layout.addWidget(self.location_entry, row, 1, 1, 2)
         row += 1
         
-        # 經緯度選擇
-        params_layout.addWidget(QLabel("經度"), row, 0)
+        # 經緯度選擇與按鈕放在同一排
+        params_layout.addWidget(QLabel("經緯度"), row, 0)
+        
+        # 建立一個水平佈局來放置經緯度與按鈕，確保寬度均分
+        coord_layout = QHBoxLayout()
+        
         self.longitude_entry = QDoubleSpinBox()
         self.longitude_entry.setRange(-180, 180)
         self.longitude_entry.setValue(121.0)
         self.longitude_entry.setDecimals(6)
         self.longitude_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.longitude_entry, row, 1)
+        self.longitude_entry.setPrefix("經: ")
+        coord_layout.addWidget(self.longitude_entry)
         
-        params_layout.addWidget(QLabel("緯度"), row, 2)
         self.latitude_entry = QDoubleSpinBox()
         self.latitude_entry.setRange(-90, 90)
         self.latitude_entry.setValue(25.0)
         self.latitude_entry.setDecimals(6)
         self.latitude_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.latitude_entry, row, 3)
-        row += 1
+        self.latitude_entry.setPrefix("緯: ")
+        coord_layout.addWidget(self.latitude_entry)
         
-        # 地圖選擇按鈕
-        params_layout.addWidget(QLabel(""), row, 0)
-        map_btn = QPushButton("🗺️ 在地圖上選擇")
+        map_btn = QPushButton("🗺️ 地圖選擇")
         map_btn.clicked.connect(self.open_map_picker)
         map_btn.setStyleSheet("padding: 8px 20px; background-color: #4CAF50; color: white; border: 1px solid #45a049; border-radius: 4px;")
-        params_layout.addWidget(map_btn, row, 1, 1, 2)
+        coord_layout.addWidget(map_btn)
+        
+        params_layout.addLayout(coord_layout, row, 1, 1, 3)
         row += 1
         
         # 價格與號碼布
@@ -498,11 +565,11 @@ class RaceshotUploaderGUI(QMainWindow):
         self.price_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
         params_layout.addWidget(self.price_entry, row, 1)
         
-        params_layout.addWidget(QLabel("號碼布"), row, 2)
-        self.bib_entry = QLineEdit()
-        self.bib_entry.setPlaceholderText("可選")
-        self.bib_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.bib_entry, row, 3)
+        # params_layout.addWidget(QLabel("號碼布"), row, 2)
+        # self.bib_entry = QLineEdit()
+        # self.bib_entry.setPlaceholderText("可選")
+        # self.bib_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
+        # params_layout.addWidget(self.bib_entry, row, 3)
         row += 1
         
         # 進階設定
@@ -511,27 +578,37 @@ class RaceshotUploaderGUI(QMainWindow):
         params_layout.addWidget(advanced_label, row, 0, 1, 4)
         row += 1
         
-        params_layout.addWidget(QLabel("併發數"), row, 0)
+        # 進階設定三個一排
+        advanced_layout = QHBoxLayout()
+        
+        # 併發數
+        concurrency_label = QLabel("併發:")
         self.concurrency_entry = QSpinBox()
         self.concurrency_entry.setRange(1, 20)
         self.concurrency_entry.setValue(20)
         self.concurrency_entry.setStyleSheet("padding: 5px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.concurrency_entry, row, 1)
+        advanced_layout.addWidget(concurrency_label)
+        advanced_layout.addWidget(self.concurrency_entry)
         
-        params_layout.addWidget(QLabel("批次大小"), row, 2)
+        # 批次大小
+        batch_label = QLabel("批次:")
         self.batch_size_entry = QSpinBox()
         self.batch_size_entry.setRange(1, 50)
         self.batch_size_entry.setValue(1)
         self.batch_size_entry.setStyleSheet("padding: 5px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.batch_size_entry, row, 3)
-        row += 1
+        advanced_layout.addWidget(batch_label)
+        advanced_layout.addWidget(self.batch_size_entry)
         
-        params_layout.addWidget(QLabel("逾時秒數"), row, 0)
+        # 逾時
+        timeout_label = QLabel("逾時:")
         self.timeout_entry = QSpinBox()
         self.timeout_entry.setRange(10, 300)
         self.timeout_entry.setValue(30)
         self.timeout_entry.setStyleSheet("padding: 5px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.timeout_entry, row, 1)
+        advanced_layout.addWidget(timeout_label)
+        advanced_layout.addWidget(self.timeout_entry)
+        
+        params_layout.addLayout(advanced_layout, row, 1, 1, 3)
         
         params_group.setLayout(params_layout)
         main_layout.addWidget(params_group)
@@ -647,17 +724,19 @@ class RaceshotUploaderGUI(QMainWindow):
                     
                 # 載入設定到介面
                 if 'token' in config:
-                    self.token_entry.setText(config['token'])
+                    token = config['token']
+                    if token:
+                        self.on_token_received(token)  # 觸發驗證
                 if 'folder' in config:
                     self.folder_entry.setText(config['folder'])
                 if 'event_id' in config:
-                    self.event_id_entry.setText(config['event_id'])
+                    self.event_combo.setCurrentText(config['event_id'])
                 if 'location' in config:
                     self.location_entry.setText(config['location'])
                 if 'price' in config:
                     self.price_entry.setValue(config['price'])
                 if 'bib_number' in config:
-                    self.bib_entry.setText(config['bib_number'])
+                    pass # bib_entry removed
                 if 'longitude' in config:
                     self.longitude_entry.setValue(config['longitude'])
                 if 'latitude' in config:
@@ -678,12 +757,12 @@ class RaceshotUploaderGUI(QMainWindow):
         """儲存目前的設定"""
         try:
             config = {
-                'token': self.token_entry.text().strip(),
+                'token': self.current_token,
                 'folder': self.folder_entry.text().strip(),
-                'event_id': self.event_id_entry.text().strip(),
+                'event_id': self.event_combo.currentText().strip().split(' (')[0] if self.event_combo.currentText() else "",
                 'location': self.location_entry.text().strip(),
                 'price': self.price_entry.value(),
-                'bib_number': self.bib_entry.text().strip(),
+                'bib_number': "", # bib_entry removed
                 'longitude': self.longitude_entry.value(),
                 'latitude': self.latitude_entry.value(),
                 'concurrency': self.concurrency_entry.value(),
@@ -699,6 +778,61 @@ class RaceshotUploaderGUI(QMainWindow):
             # 儲存失敗也不輸出，避免干擾使用者
             pass
     
+    def open_login_web(self):
+        if "api.raceshot.app" in API_BASE:
+            login_url = "https://raceshot.app/uploader-auth"
+        else:
+            login_url = "http://localhost:5173/uploader-auth"
+        webbrowser.open(login_url)
+        self.login_status_label.setText("⏳ 等待授權...")
+        self.login_status_label.setStyleSheet("color: orange; font-weight: bold; padding: 8px;")
+
+    def on_token_received(self, token):
+        self.current_token = token
+        is_valid, user, msg = verifyToken(token)
+        if is_valid:
+            role = user.get('role', 'user')
+            self.login_status_label.setText(f"🟢 已登入 ({role})")
+            self.login_status_label.setStyleSheet("color: green; font-weight: bold; padding: 8px;")
+            self.save_config()
+            self.load_events_list()
+        else:
+            self.login_status_label.setText("🔴 登入失敗或過期")
+            self.login_status_label.setStyleSheet("color: red; font-weight: bold; padding: 8px;")
+            self.current_token = ""
+            QMessageBox.warning(self, "Token 驗證失敗", f"Token 無效或已過期，請重新登入。({msg})")
+
+    def load_events_list(self):
+        if not self.current_token:
+            return
+        self.refresh_events_btn.setEnabled(False)
+        self.refresh_events_btn.setText("更新中...")
+        QApplication.processEvents()
+
+        def fetch():
+            success, evs, msg = listEvents(self.current_token)
+            return success, evs, msg
+
+        success, evs, msg = fetch()
+        self.refresh_events_btn.setEnabled(True)
+        self.refresh_events_btn.setText("🔄 更新列表")
+        
+        if success:
+            current_ev = self.event_combo.currentText().strip().split(' (')[0]
+            self.event_combo.clear()
+            self.events_list = evs
+            for ev in evs:
+                self.event_combo.addItem(f"{ev['id']} ({ev['name']} - {ev['date']})", ev['id'])
+            
+            # 嘗試回填之前選擇的
+            if current_ev:
+                for i in range(self.event_combo.count()):
+                    if self.event_combo.itemText(i).startswith(current_ev):
+                        self.event_combo.setCurrentIndex(i)
+                        break
+        else:
+            QMessageBox.warning(self, "獲取活動失敗", msg)
+
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "選擇圖片資料夾")
         if folder:
@@ -721,7 +855,7 @@ class RaceshotUploaderGUI(QMainWindow):
         self.log_text.append(message)
         
     def clear_log(self):
-        event_id = self.event_id_entry.text().strip()
+        event_id = self.event_combo.currentText().strip().split(' (')[0] if self.event_combo.currentText() else "" 
         msg = "確定要清除日誌嗎？"
         if event_id:
             msg = f"確定要清除日誌以及活動 ID '{event_id}' 的所有上傳紀錄嗎？\n\n(注意：輸入欄位內容將保留，但已上傳的紀錄將被移除，下次上傳將重新檢查)"
@@ -741,8 +875,8 @@ class RaceshotUploaderGUI(QMainWindow):
             self.log("✅ 日誌已清除。")
         
     def validate_inputs(self):
-        if not self.token_entry.text().strip():
-            QMessageBox.critical(self, "錯誤", "請輸入 API Token")
+        if not self.current_token:
+            QMessageBox.critical(self, "錯誤", "請先點擊網頁登入獲取授權")
             return False
             
         if not self.folder_entry.text().strip():
@@ -753,7 +887,7 @@ class RaceshotUploaderGUI(QMainWindow):
             QMessageBox.critical(self, "錯誤", "選擇的資料夾不存在")
             return False
             
-        if not self.event_id_entry.text().strip():
+        if not self.event_combo.currentText().strip():
             QMessageBox.critical(self, "錯誤", "請輸入活動 ID")
             return False
             
@@ -779,14 +913,24 @@ class RaceshotUploaderGUI(QMainWindow):
         # 儲存設定
         self.save_config()
             
+        event_id = self.event_combo.currentText().strip().split(' (')[0] if self.event_combo.currentText() else ""
+        
+        # 決定 API Endpoint 與 實質 ID
+        actual_event_id = event_id
+        upload_endpoint = API_ENDPOINT
+        if event_id.startswith("org_"):
+            actual_event_id = event_id[4:] # 移除 "org_" 前綴
+            upload_endpoint = HOST_API_ENDPOINT
+
         # 準備參數
         params = {
-            'token': self.token_entry.text().strip(),
+            'token': self.current_token,
             'folder': self.folder_entry.text().strip(),
-            'event_id': self.event_id_entry.text().strip(),
+            'event_id': actual_event_id,
+            'endpoint': upload_endpoint,
             'location': self.location_entry.text().strip(),
             'price': self.price_entry.value(),
-            'bib_number': self.bib_entry.text().strip() or None,
+            'bib_number': None, # bib_entry removed
             'longitude': self.longitude_entry.value() if self.longitude_entry.value() != 0 else None,
             'latitude': self.latitude_entry.value() if self.latitude_entry.value() != 0 else None,
             'concurrency': self.concurrency_entry.value(),
