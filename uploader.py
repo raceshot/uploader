@@ -25,9 +25,13 @@ import mimetypes
 import os
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
+
+from PIL import Image, ExifTags
 
 import requests
 from dotenv import load_dotenv
@@ -67,6 +71,37 @@ class UploadResult:
     status_code: Optional[int] = None
     file_path: Optional[str] = None  # 絕對路徑，供歷史紀錄使用
     signature: Optional[str] = None  # 檔案特徵值
+
+
+@dataclass
+class GpxTrackPoint:
+    timestamp_ms: int
+    latitude: float
+    longitude: float
+
+
+@dataclass
+class PhotoMatchInfo:
+    file_path: Path
+    capture_timestamp_ms: Optional[int]
+    latitude: Optional[float]
+    longitude: Optional[float]
+    source: str
+    message: str
+
+
+@dataclass
+class GpxProcessingContext:
+    track_points: List[GpxTrackPoint]
+    time_offset_seconds: int = 0
+    fallback_latitude: Optional[float] = None
+    fallback_longitude: Optional[float] = None
+    fallback_mode: str = "manual"
+    max_gap_seconds: int = 300
+
+
+EXIF_TAGS_BY_NAME = {name: tag for tag, name in ExifTags.TAGS.items()}
+DEFAULT_CAPTURE_TZ = timezone(timedelta(hours=8))
 
 
 def setupLogging() -> None:
@@ -141,6 +176,22 @@ def parseArgs(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--reupload-failures", dest="reupload_failures", action="store_true", help="讀取 output/failure_list.txt 並僅重新上傳這些失敗的檔案")
     parser.add_argument("--longitude", dest="longitude", type=float, default=None, help="經度（可用環境變數 RACESHOT_LONGITUDE）")
     parser.add_argument("--latitude", dest="latitude", type=float, default=None, help="緯度（可用環境變數 RACESHOT_LATITUDE）")
+    parser.add_argument("--gpx-file", dest="gpx_file", default=None, help="GPX 軌跡檔路徑，會依照片 EXIF 時間自動匹配座標")
+    parser.add_argument("--gpx-time-offset", dest="gpx_time_offset", type=int, default=None, help="照片時間校正秒數，可為負值")
+    parser.add_argument(
+        "--gpx-fallback-mode",
+        dest="gpx_fallback_mode",
+        choices=["manual", "empty"],
+        default=None,
+        help="GPX 無法匹配時的座標策略：manual=改用手動座標，empty=留空",
+    )
+    parser.add_argument(
+        "--gpx-max-gap",
+        dest="gpx_max_gap",
+        type=int,
+        default=None,
+        help="相鄰 GPX 點允許的最大時間差（秒），超過則不自動匹配",
+    )
     return parser.parse_args(argv)
 
 
@@ -165,6 +216,293 @@ def parseBoolEnv(val: Optional[str]) -> Optional[bool]:
     if s in {"0", "false", "no", "n", "off"}:
         return False
     return None
+
+
+def parse_exif_datetime(
+    date_str: Optional[str],
+    offset_str: Optional[str],
+    subsec_str: Optional[str],
+) -> Optional[int]:
+    """將 EXIF 日期時間轉成 UTC milliseconds。無時區時預設採用 UTC+8。"""
+    if not date_str:
+        return None
+
+    try:
+        dt = datetime.strptime(str(date_str).strip(), "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+    microseconds = 0
+    if subsec_str:
+        digits = "".join(ch for ch in str(subsec_str).strip() if ch.isdigit())
+        if digits:
+            microseconds = int((digits + "000000")[:6])
+            dt = dt.replace(microsecond=microseconds)
+
+    tzinfo = DEFAULT_CAPTURE_TZ
+    if offset_str:
+        offset_text = str(offset_str).strip()
+        sign = 1
+        if offset_text.startswith("-"):
+            sign = -1
+        cleaned = offset_text[1:] if offset_text[:1] in {"+", "-"} else offset_text
+        parts = cleaned.split(":")
+        if len(parts) == 2 and all(part.isdigit() for part in parts):
+            hours = int(parts[0])
+            minutes = int(parts[1])
+            tzinfo = timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+    aware_dt = dt.replace(tzinfo=tzinfo)
+    return int(aware_dt.astimezone(timezone.utc).timestamp() * 1000)
+
+
+def extract_capture_timestamp(file_path: Path) -> Optional[int]:
+    """從照片 EXIF 讀取拍攝時間，優先使用 DateTimeOriginal。"""
+    try:
+        with Image.open(file_path) as img:
+            exif = img.getexif()
+    except Exception as e:
+        logging.warning(f"無法讀取 EXIF：{file_path} - {e}")
+        return None
+
+    if not exif:
+        return None
+
+    date_str = exif.get(EXIF_TAGS_BY_NAME.get("DateTimeOriginal"))
+    if not date_str:
+        date_str = exif.get(EXIF_TAGS_BY_NAME.get("DateTimeDigitized"))
+    if not date_str:
+        date_str = exif.get(EXIF_TAGS_BY_NAME.get("DateTime"))
+
+    offset_str = exif.get(EXIF_TAGS_BY_NAME.get("OffsetTimeOriginal"))
+    if not offset_str:
+        offset_str = exif.get(EXIF_TAGS_BY_NAME.get("OffsetTimeDigitized"))
+    if not offset_str:
+        offset_str = exif.get(EXIF_TAGS_BY_NAME.get("OffsetTime"))
+
+    subsec_str = exif.get(EXIF_TAGS_BY_NAME.get("SubsecTimeOriginal"))
+    if not subsec_str:
+        subsec_str = exif.get(EXIF_TAGS_BY_NAME.get("SubsecTimeDigitized"))
+    if not subsec_str:
+        subsec_str = exif.get(EXIF_TAGS_BY_NAME.get("SubsecTime"))
+
+    capture_timestamp = parse_exif_datetime(date_str, offset_str, subsec_str)
+    if capture_timestamp is None:
+        logging.warning(f"EXIF 時間格式無法解析：{file_path}")
+    return capture_timestamp
+
+
+def parse_gpx_track(gpx_path: Path) -> List[GpxTrackPoint]:
+    """解析含 time 的 GPX 軌跡，回傳依時間排序的點。"""
+    try:
+        tree = ET.parse(gpx_path)
+    except Exception as e:
+        raise ValueError(f"GPX 解析失敗：{e}") from e
+
+    root = tree.getroot()
+    track_points: List[GpxTrackPoint] = []
+
+    for element in root.iter():
+        if not element.tag.endswith("trkpt"):
+            continue
+
+        lat_raw = element.attrib.get("lat")
+        lon_raw = element.attrib.get("lon")
+        if lat_raw is None or lon_raw is None:
+            continue
+
+        time_text = None
+        for child in element:
+            if child.tag.endswith("time") and child.text:
+                time_text = child.text.strip()
+                break
+        if not time_text:
+            continue
+
+        try:
+            timestamp_ms = int(datetime.fromisoformat(time_text.replace("Z", "+00:00")).timestamp() * 1000)
+            track_points.append(
+                GpxTrackPoint(
+                    timestamp_ms=timestamp_ms,
+                    latitude=float(lat_raw),
+                    longitude=float(lon_raw),
+                )
+            )
+        except Exception:
+            continue
+
+    track_points.sort(key=lambda point: point.timestamp_ms)
+    return track_points
+
+
+def interpolate_track_point(
+    track_points: List[GpxTrackPoint],
+    target_timestamp_ms: int,
+    max_gap_seconds: int = 300,
+) -> Tuple[Optional[float], Optional[float], str]:
+    """依照片時間在線性插值出 GPX 座標。"""
+    if not track_points:
+        return None, None, "GPX 沒有可用的時間點"
+
+    if target_timestamp_ms < track_points[0].timestamp_ms or target_timestamp_ms > track_points[-1].timestamp_ms:
+        return None, None, "照片時間超出 GPX 時間範圍"
+
+    for index, current in enumerate(track_points):
+        if current.timestamp_ms == target_timestamp_ms:
+            return current.latitude, current.longitude, "精確匹配 GPX 時間點"
+
+        if current.timestamp_ms > target_timestamp_ms:
+            previous = track_points[index - 1]
+            gap_ms = current.timestamp_ms - previous.timestamp_ms
+            if gap_ms <= 0:
+                return previous.latitude, previous.longitude, "使用鄰近 GPX 點"
+            if gap_ms > max_gap_seconds * 1000:
+                return None, None, f"相鄰 GPX 點間隔超過 {max_gap_seconds} 秒"
+
+            ratio = (target_timestamp_ms - previous.timestamp_ms) / gap_ms
+            latitude = previous.latitude + (current.latitude - previous.latitude) * ratio
+            longitude = previous.longitude + (current.longitude - previous.longitude) * ratio
+            return latitude, longitude, "依 GPX 時間線性插值"
+
+    last = track_points[-1]
+    return last.latitude, last.longitude, "使用最後一個 GPX 點"
+
+
+def load_gpx_processing_context(
+    gpx_file: Optional[Path],
+    time_offset_seconds: int = 0,
+    fallback_latitude: Optional[float] = None,
+    fallback_longitude: Optional[float] = None,
+    fallback_mode: str = "manual",
+    max_gap_seconds: int = 300,
+) -> Optional[GpxProcessingContext]:
+    """預先載入 GPX 軌跡，供逐張配對使用。"""
+    if gpx_file is None:
+        return None
+
+    track_points = parse_gpx_track(gpx_file)
+    if len(track_points) < 2:
+        raise ValueError("GPX 軌跡點不足，至少需要 2 個含時間的 trkpt")
+
+    return GpxProcessingContext(
+        track_points=track_points,
+        time_offset_seconds=time_offset_seconds,
+        fallback_latitude=fallback_latitude,
+        fallback_longitude=fallback_longitude,
+        fallback_mode=fallback_mode,
+        max_gap_seconds=max_gap_seconds,
+    )
+
+
+def match_photo_with_context(file_path: Path, context: Optional[GpxProcessingContext]) -> Optional[PhotoMatchInfo]:
+    """對單張照片做 GPX 對時。"""
+    if context is None:
+        return None
+
+    capture_timestamp_ms = extract_capture_timestamp(file_path)
+    if capture_timestamp_ms is None:
+        if context.fallback_mode == "manual" and context.fallback_latitude is not None and context.fallback_longitude is not None:
+            return PhotoMatchInfo(
+                file_path=file_path,
+                capture_timestamp_ms=None,
+                latitude=context.fallback_latitude,
+                longitude=context.fallback_longitude,
+                source="manual-fallback",
+                message="缺少 EXIF 拍攝時間，改用手動座標",
+            )
+        return PhotoMatchInfo(
+            file_path=file_path,
+            capture_timestamp_ms=None,
+            latitude=None,
+            longitude=None,
+            source="unmatched",
+            message="缺少 EXIF 拍攝時間，無法匹配 GPX",
+        )
+
+    adjusted_timestamp_ms = capture_timestamp_ms + (context.time_offset_seconds * 1000)
+    latitude, longitude, reason = interpolate_track_point(
+        track_points=context.track_points,
+        target_timestamp_ms=adjusted_timestamp_ms,
+        max_gap_seconds=context.max_gap_seconds,
+    )
+
+    if latitude is not None and longitude is not None:
+        return PhotoMatchInfo(
+            file_path=file_path,
+            capture_timestamp_ms=adjusted_timestamp_ms,
+            latitude=latitude,
+            longitude=longitude,
+            source="gpx",
+            message=reason,
+        )
+
+    if context.fallback_mode == "manual" and context.fallback_latitude is not None and context.fallback_longitude is not None:
+        return PhotoMatchInfo(
+            file_path=file_path,
+            capture_timestamp_ms=adjusted_timestamp_ms,
+            latitude=context.fallback_latitude,
+            longitude=context.fallback_longitude,
+            source="manual-fallback",
+            message=f"{reason}，改用手動座標",
+        )
+
+    return PhotoMatchInfo(
+        file_path=file_path,
+        capture_timestamp_ms=adjusted_timestamp_ms,
+        latitude=None,
+        longitude=None,
+        source="unmatched",
+        message=reason,
+    )
+
+
+def build_photo_match_map(
+    files: List[Path],
+    gpx_file: Optional[Path],
+    time_offset_seconds: int = 0,
+    fallback_latitude: Optional[float] = None,
+    fallback_longitude: Optional[float] = None,
+    fallback_mode: str = "manual",
+    max_gap_seconds: int = 300,
+) -> Tuple[dict[Path, PhotoMatchInfo], dict[str, int]]:
+    """建立每張照片的座標匹配結果。"""
+    match_map: dict[Path, PhotoMatchInfo] = {}
+    summary = {
+        "matched": 0,
+        "fallback_manual": 0,
+        "missing_exif": 0,
+        "outside_track": 0,
+        "unmatched": 0,
+    }
+
+    context = load_gpx_processing_context(
+        gpx_file=gpx_file,
+        time_offset_seconds=time_offset_seconds,
+        fallback_latitude=fallback_latitude,
+        fallback_longitude=fallback_longitude,
+        fallback_mode=fallback_mode,
+        max_gap_seconds=max_gap_seconds,
+    )
+    if context is None:
+        return match_map, summary
+
+    for file_path in files:
+        match_info = match_photo_with_context(file_path, context)
+        if match_info is None:
+            continue
+        match_map[file_path] = match_info
+        if match_info.source == "gpx":
+            summary["matched"] += 1
+        elif match_info.source == "manual-fallback":
+            summary["fallback_manual"] += 1
+        else:
+            summary["unmatched"] += 1
+            if match_info.capture_timestamp_ms is None:
+                summary["missing_exif"] += 1
+        if "超出 GPX 時間範圍" in match_info.message:
+            summary["outside_track"] += 1
+
+    return match_map, summary
 
 
 def collectImageFiles(root_dir: Path) -> List[Path]:
@@ -851,6 +1189,41 @@ def clear_event_history(event_id: str) -> int:
     return removed_count
 
 
+def consume_limited_futures(
+    executor: ThreadPoolExecutor,
+    items: List,
+    submit_func,
+    max_in_flight: int,
+):
+    """控制同時在途的 future 數量，避免大量檔案時記憶體與排程壓力過大。"""
+    if max_in_flight <= 0:
+        max_in_flight = 1
+
+    item_iter = iter(items)
+    future_map = {}
+
+    while len(future_map) < max_in_flight:
+        try:
+            item = next(item_iter)
+        except StopIteration:
+            break
+        future = submit_func(item)
+        future_map[future] = item
+
+    while future_map:
+        for future in as_completed(list(future_map.keys()), timeout=None):
+            item = future_map.pop(future)
+            yield item, future
+            try:
+                next_item = next(item_iter)
+            except StopIteration:
+                next_item = None
+            if next_item is not None:
+                next_future = submit_func(next_item)
+                future_map[next_future] = next_item
+            break
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     args = parseArgs(argv)
     setupLogging()
@@ -885,6 +1258,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     env_batch_size = os.getenv("RACESHOT_BATCH_SIZE")
     env_longitude = os.getenv("RACESHOT_LONGITUDE")
     env_latitude = os.getenv("RACESHOT_LATITUDE")
+    env_gpx_file = os.getenv("RACESHOT_GPX_FILE")
+    env_gpx_time_offset = os.getenv("RACESHOT_GPX_TIME_OFFSET")
+    env_gpx_fallback_mode = os.getenv("RACESHOT_GPX_FALLBACK_MODE")
+    env_gpx_max_gap = os.getenv("RACESHOT_GPX_MAX_GAP")
 
     directory = args.directory or env_dir
     event_id = args.event_id or env_event_id
@@ -952,6 +1329,34 @@ def main(argv: Optional[List[str]] = None) -> None:
             latitude_eff = float(env_latitude)
         except Exception:
             logging.warning(f"RACESHOT_LATITUDE 無法解析為浮點數：{env_latitude!r}")
+
+    gpx_file_eff: Optional[Path] = None
+    raw_gpx_file = args.gpx_file or env_gpx_file
+    if raw_gpx_file:
+        gpx_file_eff = Path(raw_gpx_file).expanduser().resolve()
+
+    if args.gpx_time_offset is not None:
+        gpx_time_offset_eff = int(args.gpx_time_offset)
+    else:
+        try:
+            gpx_time_offset_eff = int(env_gpx_time_offset) if env_gpx_time_offset is not None else 0
+        except Exception:
+            logging.warning(f"RACESHOT_GPX_TIME_OFFSET 無法解析為整數：{env_gpx_time_offset!r}，改用 0")
+            gpx_time_offset_eff = 0
+
+    gpx_fallback_mode_eff = args.gpx_fallback_mode or env_gpx_fallback_mode or "manual"
+    if gpx_fallback_mode_eff not in {"manual", "empty"}:
+        logging.warning(f"RACESHOT_GPX_FALLBACK_MODE 無效：{gpx_fallback_mode_eff!r}，改用 manual")
+        gpx_fallback_mode_eff = "manual"
+
+    if args.gpx_max_gap is not None:
+        gpx_max_gap_eff = max(1, int(args.gpx_max_gap))
+    else:
+        try:
+            gpx_max_gap_eff = max(1, int(env_gpx_max_gap)) if env_gpx_max_gap is not None else 300
+        except Exception:
+            logging.warning(f"RACESHOT_GPX_MAX_GAP 無法解析為整數：{env_gpx_max_gap!r}，改用 300")
+            gpx_max_gap_eff = 300
     # 解析併發與批次
     if args.concurrency is not None:
         concurrency_eff = max(1, int(args.concurrency))
@@ -985,6 +1390,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     token = getApiToken(args.token)
     root_dir = Path(directory).expanduser().resolve()
+
+    if gpx_file_eff and not gpx_file_eff.exists():
+        logging.error(f"指定的 GPX 檔案不存在：{gpx_file_eff}")
+        sys.exit(1)
 
     files: List[Path]
     if args.reupload_failures:
@@ -1027,19 +1436,71 @@ def main(argv: Optional[List[str]] = None) -> None:
     
     files = final_files
 
+    gpx_context = None
+    if gpx_file_eff:
+        logging.info(f"GPX 自動座標模式啟用：{gpx_file_eff}")
+        preview_files = files[: min(len(files), 200)]
+        _, match_summary = build_photo_match_map(
+            files=preview_files,
+            gpx_file=gpx_file_eff,
+            time_offset_seconds=gpx_time_offset_eff,
+            fallback_latitude=latitude_eff,
+            fallback_longitude=longitude_eff,
+            fallback_mode=gpx_fallback_mode_eff,
+            max_gap_seconds=gpx_max_gap_eff,
+        )
+        gpx_context = load_gpx_processing_context(
+            gpx_file=gpx_file_eff,
+            time_offset_seconds=gpx_time_offset_eff,
+            fallback_latitude=latitude_eff,
+            fallback_longitude=longitude_eff,
+            fallback_mode=gpx_fallback_mode_eff,
+            max_gap_seconds=gpx_max_gap_eff,
+        )
+        logging.info(
+            f"GPX 預檢結果（前 {len(preview_files)} 張）："
+            f"成功 {match_summary['matched']}，"
+            f"手動回退 {match_summary['fallback_manual']}，"
+            f"缺少 EXIF {match_summary['missing_exif']}，"
+            f"超出範圍 {match_summary['outside_track']}，"
+            f"未匹配 {match_summary['unmatched']}"
+        )
+        if batch_size_eff != 1:
+            logging.info("GPX 模式需逐張帶入不同座標，已自動將 batch_size 調整為 1")
+            batch_size_eff = 1
+
     if dry_run_eff:
         for p in files:
-            logging.info(f"DRY-RUN 將上傳：{p} (Sig={getFileSignature(p)})")
+            match_info = match_photo_with_context(p, gpx_context)
+            if match_info:
+                logging.info(
+                    f"DRY-RUN 將上傳：{p} "
+                    f"(lat={match_info.latitude}, lon={match_info.longitude}, source={match_info.source}, note={match_info.message})"
+                )
+            else:
+                logging.info(f"DRY-RUN 將上傳：{p} (Sig={getFileSignature(p)})")
         logging.info("Dry run 結束，未呼叫 API。")
         return
 
     results: List[UploadResult] = []
-    if concurrency_eff == 1 and batch_size_eff == 1:
+    if batch_size_eff == 1:
         # 舊行為：單執行緒、逐張
-        session = requests.Session()
-        for idx, file_path in enumerate(files, start=1):
-            logging.info(f"({idx}/{len(files)}) 上傳 {file_path.name} 中…")
-            result = uploadSingleImage(
+        def upload_one(idx: int, file_path: Path) -> UploadResult:
+            match_info = match_photo_with_context(file_path, gpx_context)
+            effective_longitude = longitude_eff
+            effective_latitude = latitude_eff
+            if match_info:
+                effective_latitude = match_info.latitude
+                effective_longitude = match_info.longitude
+                logging.info(
+                    f"({idx}/{len(files)}) 上傳 {file_path.name} 中… "
+                    f"[{match_info.source}] {match_info.message}"
+                )
+            else:
+                logging.info(f"({idx}/{len(files)}) 上傳 {file_path.name} 中…")
+
+            session = requests.Session()
+            return uploadSingleImage(
                 session=session,
                 token=token,
                 file_path=file_path,
@@ -1050,12 +1511,37 @@ def main(argv: Optional[List[str]] = None) -> None:
                 timeout=float(timeout_eff),
                 max_retries=int(max_retries_eff),
                 retry_backoff=float(retry_backoff_eff),
-                longitude=longitude_eff,
-                latitude=latitude_eff,
+                longitude=effective_longitude,
+                latitude=effective_latitude,
+                endpoint=API_ENDPOINT,
             )
-            results.append(result)
-            # 逐檔即時寫入
-            append_results([result], event_id=event_id, location=location)
+
+        if concurrency_eff == 1:
+            for idx, file_path in enumerate(files, start=1):
+                result = upload_one(idx, file_path)
+                results.append(result)
+                append_results([result], event_id=event_id, location=location)
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency_eff) as executor:
+                indexed_files = list(enumerate(files, start=1))
+
+                def submit_indexed(item):
+                    idx, file_path = item
+                    return executor.submit(upload_one, idx, file_path)
+
+                for item, future in consume_limited_futures(
+                    executor=executor,
+                    items=indexed_files,
+                    submit_func=submit_indexed,
+                    max_in_flight=max(concurrency_eff * 2, 4),
+                ):
+                    try:
+                        result = future.result()
+                        results.append(result)
+                        append_results([result], event_id=event_id, location=location)
+                    except Exception as e:
+                        idx, file_path = item
+                        logging.exception(f"單張上傳失敗：{file_path} - {e}")
     else:
         # 併發 + 批次（每個工作處理一個批次）
         batches = chunked(files, batch_size_eff)

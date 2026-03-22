@@ -38,6 +38,10 @@ python3 uploader.py --dir <圖片資料夾> \
   [--bib-number <號碼布>] \
   [--longitude <經度>] \
   [--latitude <緯度>] \
+  [--gpx-file <GPX 檔案>] \
+  [--gpx-time-offset <秒，可為負值>] \
+  [--gpx-fallback-mode <manual|empty>] \
+  [--gpx-max-gap <秒，預設300>] \
   [--token <API Token，否則讀取環境變數>] \
   [--max-retries <重試次數，預設3>] \
   [--retry-backoff <重試退避係數，預設1.5>] \
@@ -84,6 +88,19 @@ python3 uploader.py --dir ./images \
   --token "YOUR_TOKEN"
 ```
 
+```bash
+# 使用 GPX 軌跡，依照片 EXIF 拍攝時間自動匹配每張照片座標
+python3 uploader.py --dir ./images \
+  --event-id evt_2025_09_10 \
+  --location "賽道沿線" \
+  --gpx-file ./track.gpx \
+  --gpx-time-offset -120 \
+  --gpx-fallback-mode manual \
+  --latitude 25.033611 \
+  --longitude 121.565000 \
+  --token "YOUR_TOKEN"
+```
+
 ### 使用 .env 設定變數
 
 支援自動載入專案根目錄的 `.env`，或使用 `--env-file` 指定路徑。最常見的是在 `.env` 放入 Token：
@@ -93,6 +110,10 @@ python3 uploader.py --dir ./images \
 RACESHOT_API_TOKEN=YOUR_API_TOKEN
 RACESHOT_LONGITUDE=121.565000
 RACESHOT_LATITUDE=25.033611
+RACESHOT_GPX_FILE=./track.gpx
+RACESHOT_GPX_TIME_OFFSET=0
+RACESHOT_GPX_FALLBACK_MODE=manual
+RACESHOT_GPX_MAX_GAP=300
 ```
 
 執行時會自動讀取當前目錄的 `.env`；如需指定其他路徑：
@@ -106,6 +127,7 @@ python3 uploader.py --dir ./images \
 
 注意：
 - `.env` 可用於提供 `RACESHOT_API_TOKEN`、`RACESHOT_LONGITUDE` 和 `RACESHOT_LATITUDE`。
+- 若有 GPX，可另外提供 `RACESHOT_GPX_FILE`、`RACESHOT_GPX_TIME_OFFSET`、`RACESHOT_GPX_FALLBACK_MODE`、`RACESHOT_GPX_MAX_GAP`。
 - 指令列參數若有提供，會優先於環境變數。
 
 ## 輸出檔案
@@ -128,6 +150,14 @@ python3 uploader.py --dir ./images \
 - 支持直接輸入經度和緯度數值
 - 座標會自動保存到配置檔案
 
+### GPX 自動座標功能
+- 可選擇 `.gpx` 軌跡檔，程式會讀取軌跡中的時間與座標
+- 逐張讀取照片 EXIF 拍攝時間，依時間匹配 GPX 軌跡
+- 介面可設定「時間偏移（秒）」用來校正相機時間快慢
+- 若匹配不到，可選擇「改用手動座標」或「留空座標」
+- GPX 模式下會自動改成逐張上傳，以便每張照片帶入不同座標
+- 提供「抽樣預覽」功能，只分析前幾十張樣本，方便快速校正時間偏移，不會先把整批數千張照片全部預跑
+
 ### 配置保存
 - 所有設定（包括經緯度）會自動保存
 - 下次啟動時自動載入上次的設定
@@ -138,6 +168,8 @@ python3 uploader.py --dir ./images \
 - 若後端回傳「已重複上傳」等錯誤，會記錄於 `failure_list.txt`，以便後續檢查。
 - 建議先使用 `--dry-run` 檢查目錄掃描是否正確，再正式上傳。
 - 地圖功能需要網際網路連線以載入 OpenStreetMap 瓦片和 Leaflet 庫。
+- GPX 自動匹配依賴照片 EXIF 拍攝時間；若照片沒有 `DateTimeOriginal` 等時間欄位，將無法自動對時。
+- 若 GPX 與照片時間有落差，請先調整「時間偏移」再上傳。
 
 ## 疑難排解
 

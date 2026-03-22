@@ -7,11 +7,13 @@ import sys
 import threading
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QProgressBar, QFileDialog,
-    QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox, QComboBox
+    QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox, QComboBox,
+    QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
 import webbrowser
@@ -40,6 +42,10 @@ from uploader import (
     listEvents,
     API_ENDPOINT,
     HOST_API_ENDPOINT,
+    build_photo_match_map,
+    load_gpx_processing_context,
+    match_photo_with_context,
+    consume_limited_futures,
 )
 import requests
 
@@ -224,6 +230,65 @@ class MapPickerDialog(QDialog):
         return self.latitude, self.longitude
 
 
+class GpxPreviewDialog(QDialog):
+    """顯示 GPX 抽樣匹配結果，避免大量照片時全量預覽造成卡頓。"""
+
+    def __init__(self, summary, results, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("GPX 抽樣預覽")
+        self.resize(980, 640)
+
+        layout = QVBoxLayout(self)
+
+        summary_label = QLabel(
+            f"抽樣 {summary['sample_count']} 張，"
+            f"成功 {summary['matched']}，"
+            f"手動回退 {summary['fallback_manual']}，"
+            f"缺少 EXIF {summary['missing_exif']}，"
+            f"超出範圍 {summary['outside_track']}，"
+            f"未匹配 {summary['unmatched']}"
+        )
+        summary_label.setStyleSheet("font-weight: bold; color: #1F6AA5; padding: 6px 0;")
+        layout.addWidget(summary_label)
+
+        hint_label = QLabel("提示：這是抽樣預覽，不會先分析整批全部照片。若結果偏移，請調整「時間偏移(秒)」再試一次。")
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("color: #666;")
+        layout.addWidget(hint_label)
+
+        table = QTableWidget(len(results), 5)
+        table.setHorizontalHeaderLabels(["檔名", "來源", "拍攝時間(UTC)", "座標", "說明"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        for row, info in enumerate(results):
+            capture_text = "-"
+            if info.capture_timestamp_ms is not None:
+                capture_text = datetime.utcfromtimestamp(info.capture_timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+            coord_text = "-"
+            if info.latitude is not None and info.longitude is not None:
+                coord_text = f"{info.latitude:.6f}, {info.longitude:.6f}"
+
+            table.setItem(row, 0, QTableWidgetItem(info.file_path.name))
+            table.setItem(row, 1, QTableWidgetItem(info.source))
+            table.setItem(row, 2, QTableWidgetItem(capture_text))
+            table.setItem(row, 3, QTableWidgetItem(coord_text))
+            table.setItem(row, 4, QTableWidgetItem(info.message))
+
+        layout.addWidget(table)
+
+        close_btn = QPushButton("關閉")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setStyleSheet("padding: 8px 16px; background-color: #3B8ED0; color: white; border-radius: 4px;")
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+
 class UploadWorker(QThread):
     """上傳工作執行緒"""
     log_signal = pyqtSignal(str)
@@ -248,6 +313,10 @@ class UploadWorker(QThread):
             bib_number = self.params.get('bib_number')
             longitude = self.params.get('longitude')
             latitude = self.params.get('latitude')
+            gpx_file = self.params.get('gpx_file')
+            gpx_time_offset = self.params.get('gpx_time_offset', 0)
+            gpx_fallback_mode = self.params.get('gpx_fallback_mode', 'manual')
+            gpx_max_gap = self.params.get('gpx_max_gap', 300)
             concurrency = self.params.get('concurrency', 1)
             batch_size = self.params.get('batch_size', 1)
             timeout = self.params.get('timeout', 30.0)
@@ -301,6 +370,39 @@ class UploadWorker(QThread):
                 self.log_signal.emit("✅ 所有檔案都已上傳過")
                 self.finished_signal.emit(0, 0)
                 return
+
+            gpx_context = None
+            if gpx_file:
+                self.log_signal.emit(f"🧭 載入 GPX：{gpx_file}")
+                preview_files = files[: min(len(files), 200)]
+                _, match_summary = build_photo_match_map(
+                    files=preview_files,
+                    gpx_file=Path(gpx_file),
+                    time_offset_seconds=int(gpx_time_offset),
+                    fallback_latitude=latitude,
+                    fallback_longitude=longitude,
+                    fallback_mode=str(gpx_fallback_mode),
+                    max_gap_seconds=int(gpx_max_gap),
+                )
+                gpx_context = load_gpx_processing_context(
+                    gpx_file=Path(gpx_file),
+                    time_offset_seconds=int(gpx_time_offset),
+                    fallback_latitude=latitude,
+                    fallback_longitude=longitude,
+                    fallback_mode=str(gpx_fallback_mode),
+                    max_gap_seconds=int(gpx_max_gap),
+                )
+                self.log_signal.emit(
+                    f"🧭 GPX 預檢摘要（前 {len(preview_files)} 張）："
+                    f"成功 {match_summary['matched']}，"
+                    f"手動回退 {match_summary['fallback_manual']}，"
+                    f"缺少 EXIF {match_summary['missing_exif']}，"
+                    f"超出範圍 {match_summary['outside_track']}，"
+                    f"未匹配 {match_summary['unmatched']}"
+                )
+                if batch_size != 1:
+                    self.log_signal.emit("ℹ️ GPX 模式需要逐張帶入不同座標，已自動改為批次大小 1")
+                    batch_size = 1
                 
             self.log_signal.emit(f"🚀 開始上傳 {len(files)} 張圖片...")
             self.log_signal.emit(f"⚙️ 設定：併發={concurrency}, 批次={batch_size}, 逾時={timeout}s")
@@ -308,18 +410,18 @@ class UploadWorker(QThread):
             results = []
             total = len(files)
             
-            if concurrency == 1 and batch_size == 1:
-                # 單執行緒逐張上傳
-                session = requests.Session()
-                for idx, file_path in enumerate(files, start=1):
-                    if not self.is_running:
-                        self.log_signal.emit("⏸️ 上傳已停止")
-                        break
-                        
-                    self.log_signal.emit(f"({idx}/{total}) 上傳 {file_path.name}...")
-                    progress = int(idx / total * 100)
-                    self.progress_signal.emit(progress, f"上傳中：{idx}/{total}")
-                    
+            if batch_size == 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def process_single(idx_file, file_path):
+                    match_info = match_photo_with_context(file_path, gpx_context)
+                    effective_longitude = longitude
+                    effective_latitude = latitude
+                    if match_info:
+                        effective_latitude = match_info.latitude
+                        effective_longitude = match_info.longitude
+
+                    session = requests.Session()
                     result = uploadSingleImage(
                         session=session,
                         token=token,
@@ -331,19 +433,70 @@ class UploadWorker(QThread):
                         timeout=timeout,
                         max_retries=3,
                         retry_backoff=1.5,
-                        longitude=longitude,
-                        latitude=latitude,
+                        longitude=effective_longitude,
+                        latitude=effective_latitude,
                         endpoint=endpoint,
                     )
-                    results.append(result)
-                    
-                    if result.success:
-                        self.log_signal.emit(f"  ✅ 成功：{file_path.name}")
-                    else:
-                        self.log_signal.emit(f"  ❌ 失敗：{file_path.name} - {result.error}")
-                        
-                    # 即時寫入結果
-                    append_results([result], event_id=event_id, location=location)
+                    return idx_file, result, match_info
+
+                if concurrency == 1:
+                    for idx, file_path in enumerate(files, start=1):
+                        if not self.is_running:
+                            self.log_signal.emit("⏸️ 上傳已停止")
+                            break
+
+                        match_info = match_photo_with_context(file_path, gpx_context)
+                        if match_info:
+                            self.log_signal.emit(f"({idx}/{total}) 上傳 {file_path.name}... [{match_info.source}] {match_info.message}")
+                        else:
+                            self.log_signal.emit(f"({idx}/{total}) 上傳 {file_path.name}...")
+                        progress = int(idx / total * 100)
+                        self.progress_signal.emit(progress, f"上傳中：{idx}/{total}")
+
+                        _, result, match_info = process_single(idx, file_path)
+                        results.append(result)
+
+                        if result.success:
+                            self.log_signal.emit(f"  ✅ 成功：{file_path.name}")
+                        else:
+                            self.log_signal.emit(f"  ❌ 失敗：{file_path.name} - {result.error}")
+
+                        append_results([result], event_id=event_id, location=location)
+                else:
+                    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                        completed = 0
+                        indexed_files = list(enumerate(files, start=1))
+
+                        def submit_indexed(item):
+                            idx, file_path = item
+                            return executor.submit(process_single, idx, file_path)
+
+                        for item, fut in consume_limited_futures(
+                            executor=executor,
+                            items=indexed_files,
+                            submit_func=submit_indexed,
+                            max_in_flight=max(concurrency * 2, 4),
+                        ):
+                            if not self.is_running:
+                                self.log_signal.emit("⏸️ 上傳已停止")
+                                break
+
+                            idx, file_path = item
+                            result_idx, result, match_info = fut.result()
+                            results.append(result)
+                            completed += 1
+
+                            progress = int(completed / total * 100)
+                            self.progress_signal.emit(progress, f"上傳中：{completed}/{total}")
+
+                            if match_info:
+                                self.log_signal.emit(f"({result_idx}/{total}) {file_path.name} 配對結果：[{match_info.source}] {match_info.message}")
+                            if result.success:
+                                self.log_signal.emit(f"  ✅ 成功：{file_path.name}")
+                            else:
+                                self.log_signal.emit(f"  ❌ 失敗：{file_path.name} - {result.error}")
+
+                            append_results([result], event_id=event_id, location=location)
             else:
                 # 批次上傳
                 batches = chunked(files, batch_size)
@@ -556,6 +709,63 @@ class RaceshotUploaderGUI(QMainWindow):
         
         params_layout.addLayout(coord_layout, row, 1, 1, 3)
         row += 1
+
+        params_layout.addWidget(QLabel("GPX 軌跡"), row, 0)
+        gpx_layout = QHBoxLayout()
+        self.gpx_file_entry = QLineEdit()
+        self.gpx_file_entry.setPlaceholderText("可選：選擇 .gpx，自動依照片時間匹配座標")
+        self.gpx_file_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
+        gpx_layout.addWidget(self.gpx_file_entry)
+
+        gpx_browse_btn = QPushButton("📍 選擇 GPX")
+        gpx_browse_btn.clicked.connect(self.browse_gpx_file)
+        gpx_browse_btn.setStyleSheet("padding: 8px 16px; background-color: #607D8B; color: white; border-radius: 4px;")
+        gpx_layout.addWidget(gpx_browse_btn)
+
+        self.gpx_preview_btn = QPushButton("👀 抽樣預覽")
+        self.gpx_preview_btn.clicked.connect(self.preview_gpx_matches)
+        self.gpx_preview_btn.setStyleSheet("padding: 8px 16px; background-color: #8E6C3A; color: white; border-radius: 4px;")
+        gpx_layout.addWidget(self.gpx_preview_btn)
+        params_layout.addLayout(gpx_layout, row, 1, 1, 3)
+        row += 1
+
+        params_layout.addWidget(QLabel("GPX 設定"), row, 0)
+        gpx_options_layout = QHBoxLayout()
+
+        offset_label = QLabel("時間偏移(秒):")
+        self.gpx_time_offset_entry = QSpinBox()
+        self.gpx_time_offset_entry.setRange(-43200, 43200)
+        self.gpx_time_offset_entry.setValue(0)
+        self.gpx_time_offset_entry.setStyleSheet("padding: 5px; border: 1px solid #ccc; border-radius: 4px;")
+        gpx_options_layout.addWidget(offset_label)
+        gpx_options_layout.addWidget(self.gpx_time_offset_entry)
+
+        fallback_label = QLabel("匹配不到:")
+        self.gpx_fallback_combo = QComboBox()
+        self.gpx_fallback_combo.addItem("改用手動座標", "manual")
+        self.gpx_fallback_combo.addItem("留空座標", "empty")
+        self.gpx_fallback_combo.setStyleSheet("padding: 5px; border: 1px solid #ccc; border-radius: 4px;")
+        gpx_options_layout.addWidget(fallback_label)
+        gpx_options_layout.addWidget(self.gpx_fallback_combo)
+
+        max_gap_label = QLabel("最大間隔(秒):")
+        self.gpx_max_gap_entry = QSpinBox()
+        self.gpx_max_gap_entry.setRange(1, 3600)
+        self.gpx_max_gap_entry.setValue(300)
+        self.gpx_max_gap_entry.setStyleSheet("padding: 5px; border: 1px solid #ccc; border-radius: 4px;")
+        gpx_options_layout.addWidget(max_gap_label)
+        gpx_options_layout.addWidget(self.gpx_max_gap_entry)
+
+        sample_label = QLabel("預覽張數:")
+        self.gpx_preview_count_entry = QSpinBox()
+        self.gpx_preview_count_entry.setRange(10, 500)
+        self.gpx_preview_count_entry.setValue(50)
+        self.gpx_preview_count_entry.setStyleSheet("padding: 5px; border: 1px solid #ccc; border-radius: 4px;")
+        gpx_options_layout.addWidget(sample_label)
+        gpx_options_layout.addWidget(self.gpx_preview_count_entry)
+
+        params_layout.addLayout(gpx_options_layout, row, 1, 1, 3)
+        row += 1
         
         # 價格與號碼布
         params_layout.addWidget(QLabel("價格"), row, 0)
@@ -741,6 +951,18 @@ class RaceshotUploaderGUI(QMainWindow):
                     self.longitude_entry.setValue(config['longitude'])
                 if 'latitude' in config:
                     self.latitude_entry.setValue(config['latitude'])
+                if 'gpx_file' in config:
+                    self.gpx_file_entry.setText(config['gpx_file'])
+                if 'gpx_time_offset' in config:
+                    self.gpx_time_offset_entry.setValue(config['gpx_time_offset'])
+                if 'gpx_fallback_mode' in config:
+                    idx = self.gpx_fallback_combo.findData(config['gpx_fallback_mode'])
+                    if idx >= 0:
+                        self.gpx_fallback_combo.setCurrentIndex(idx)
+                if 'gpx_max_gap' in config:
+                    self.gpx_max_gap_entry.setValue(config['gpx_max_gap'])
+                if 'gpx_preview_count' in config:
+                    self.gpx_preview_count_entry.setValue(config['gpx_preview_count'])
                 if 'concurrency' in config:
                     self.concurrency_entry.setValue(config['concurrency'])
                 if 'batch_size' in config:
@@ -765,6 +987,11 @@ class RaceshotUploaderGUI(QMainWindow):
                 'bib_number': "", # bib_entry removed
                 'longitude': self.longitude_entry.value(),
                 'latitude': self.latitude_entry.value(),
+                'gpx_file': self.gpx_file_entry.text().strip(),
+                'gpx_time_offset': self.gpx_time_offset_entry.value(),
+                'gpx_fallback_mode': self.gpx_fallback_combo.currentData(),
+                'gpx_max_gap': self.gpx_max_gap_entry.value(),
+                'gpx_preview_count': self.gpx_preview_count_entry.value(),
                 'concurrency': self.concurrency_entry.value(),
                 'batch_size': self.batch_size_entry.value(),
                 'timeout': self.timeout_entry.value(),
@@ -837,6 +1064,61 @@ class RaceshotUploaderGUI(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "選擇圖片資料夾")
         if folder:
             self.folder_entry.setText(folder)
+
+    def browse_gpx_file(self):
+        gpx_file, _ = QFileDialog.getOpenFileName(self, "選擇 GPX 軌跡檔", "", "GPX Files (*.gpx);;All Files (*)")
+        if gpx_file:
+            self.gpx_file_entry.setText(gpx_file)
+
+    def preview_gpx_matches(self):
+        folder_text = self.folder_entry.text().strip()
+        gpx_file_text = self.gpx_file_entry.text().strip()
+
+        if not folder_text:
+            QMessageBox.warning(self, "提示", "請先選擇相片資料夾")
+            return
+        if not Path(folder_text).exists():
+            QMessageBox.warning(self, "提示", "選擇的相片資料夾不存在")
+            return
+        if not gpx_file_text:
+            QMessageBox.warning(self, "提示", "請先選擇 GPX 檔案")
+            return
+        if not Path(gpx_file_text).exists():
+            QMessageBox.warning(self, "提示", "選擇的 GPX 檔案不存在")
+            return
+
+        sample_count = self.gpx_preview_count_entry.value()
+
+        try:
+            self.gpx_preview_btn.setEnabled(False)
+            self.gpx_preview_btn.setText("預覽中...")
+            QApplication.processEvents()
+
+            files = collectImageFiles(Path(folder_text))
+            if not files:
+                QMessageBox.information(self, "GPX 抽樣預覽", "資料夾內沒有可預覽的圖片")
+                return
+
+            sample_files = files[: min(len(files), sample_count)]
+            match_map, summary = build_photo_match_map(
+                files=sample_files,
+                gpx_file=Path(gpx_file_text),
+                time_offset_seconds=self.gpx_time_offset_entry.value(),
+                fallback_latitude=self.latitude_entry.value() if self.latitude_entry.value() != 0 else None,
+                fallback_longitude=self.longitude_entry.value() if self.longitude_entry.value() != 0 else None,
+                fallback_mode=self.gpx_fallback_combo.currentData(),
+                max_gap_seconds=self.gpx_max_gap_entry.value(),
+            )
+            summary["sample_count"] = len(sample_files)
+
+            preview_results = [match_map[p] for p in sample_files if p in match_map]
+            dialog = GpxPreviewDialog(summary, preview_results, self)
+            dialog.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "GPX 抽樣預覽失敗", str(e))
+        finally:
+            self.gpx_preview_btn.setEnabled(True)
+            self.gpx_preview_btn.setText("👀 抽樣預覽")
     
     def open_map_picker(self):
         """打開地圖選擇對話框"""
@@ -894,6 +1176,11 @@ class RaceshotUploaderGUI(QMainWindow):
         if not self.location_entry.text().strip():
             QMessageBox.critical(self, "錯誤", "請輸入拍攝地點")
             return False
+
+        gpx_file = self.gpx_file_entry.text().strip()
+        if gpx_file and not Path(gpx_file).exists():
+            QMessageBox.critical(self, "錯誤", "選擇的 GPX 檔案不存在")
+            return False
             
         return True
         
@@ -933,6 +1220,10 @@ class RaceshotUploaderGUI(QMainWindow):
             'bib_number': None, # bib_entry removed
             'longitude': self.longitude_entry.value() if self.longitude_entry.value() != 0 else None,
             'latitude': self.latitude_entry.value() if self.latitude_entry.value() != 0 else None,
+            'gpx_file': self.gpx_file_entry.text().strip() or None,
+            'gpx_time_offset': self.gpx_time_offset_entry.value(),
+            'gpx_fallback_mode': self.gpx_fallback_combo.currentData(),
+            'gpx_max_gap': self.gpx_max_gap_entry.value(),
             'concurrency': self.concurrency_entry.value(),
             'batch_size': self.batch_size_entry.value(),
             'timeout': float(self.timeout_entry.value()),
