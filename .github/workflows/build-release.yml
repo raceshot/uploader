@@ -15,15 +15,15 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: Linux
-            artifact_name: 運動拍檔上傳工具-Linux
+            artifact_name: raceshot-uploader-linux
             build_script: build_linux.sh
           - os: windows-latest
             platform: Windows
-            artifact_name: 運動拍檔上傳工具-Windows
+            artifact_name: raceshot-uploader-windows
             build_script: build_windows.bat
           - os: macos-latest
             platform: macOS
-            artifact_name: 運動拍檔上傳工具-macOS
+            artifact_name: raceshot-uploader-macos
             build_script: build_macos.sh
 
     steps:
@@ -95,5 +95,5 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          body: "使用說明: https://github.com/raceshot/uploader/blob/main/how_to_use/index.md"
+          body: "使用說明: https://docs.google.com/presentation/d/e/2PACX-1vSVF2VeULAQL79uGSwVtWtMU9_0BwMB2LtcOCSJd_aLv5WqCfOPHHlpB--IVECDuJpP7COF4MXUdlmu/pub?start=false&loop=false&delayms=3000&slide=id.g3b352f17e16_0_171"
           fail_on_unmatched_files: false
