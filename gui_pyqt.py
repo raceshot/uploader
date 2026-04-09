@@ -600,8 +600,7 @@ class RaceshotUploaderGUI(QMainWindow):
         """建立標題 logo；若遠端載入失敗則回退為純文字標題。"""
         logo_label = QLabel()
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_label.setStyleSheet("background-color: #B22529; border-radius: 10px; padding: 14px; margin-bottom: 10px;")
-        logo_label.setMinimumHeight(92)
+        logo_label.setStyleSheet("margin-bottom: 8px;")
         logo_label.setToolTip("RaceShot")
 
         try:
@@ -610,11 +609,11 @@ class RaceshotUploaderGUI(QMainWindow):
             renderer = QSvgRenderer(QByteArray(response.content))
             if renderer.isValid():
                 default_size = renderer.defaultSize()
-                width = 420
+                width = 360
                 if default_size.width() > 0 and default_size.height() > 0:
-                    height = max(70, int(default_size.height() * width / default_size.width()))
+                    height = max(48, int(default_size.height() * width / default_size.width()))
                 else:
-                    height = 80
+                    height = 60
 
                 pixmap = QPixmap(width, height)
                 pixmap.fill(Qt.GlobalColor.transparent)
@@ -622,6 +621,7 @@ class RaceshotUploaderGUI(QMainWindow):
                 renderer.render(painter)
                 painter.end()
                 logo_label.setPixmap(pixmap)
+                logo_label.setFixedHeight(height + 4)
                 return logo_label
         except Exception:
             pass
@@ -629,7 +629,7 @@ class RaceshotUploaderGUI(QMainWindow):
         logo_label.setText("運動拍檔 Raceshot 圖片上傳工具")
         logo_label.setFont(QFont("Arial", 20, QFont.Weight.Bold))
         logo_label.setStyleSheet(
-            "background-color: #B22529; color: white; border-radius: 10px; padding: 18px; margin-bottom: 10px;"
+            "color: #B22529; padding: 6px 0 10px 0;"
         )
         return logo_label
         
