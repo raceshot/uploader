@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QByteArray
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QByteArray, QRectF, QSize
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -609,19 +609,26 @@ class RaceshotUploaderGUI(QMainWindow):
             renderer = QSvgRenderer(QByteArray(response.content))
             if renderer.isValid():
                 default_size = renderer.defaultSize()
-                width = 360
+                width = 192
+                height = 32
+                available_width = width - 4
+                available_height = height - 2
+                render_width = available_width
+                render_height = available_height
                 if default_size.width() > 0 and default_size.height() > 0:
-                    height = max(48, int(default_size.height() * width / default_size.width()))
-                else:
-                    height = 60
+                    scale = min(available_width / default_size.width(), available_height / default_size.height())
+                    render_width = default_size.width() * scale
+                    render_height = default_size.height() * scale
 
                 pixmap = QPixmap(width, height)
                 pixmap.fill(Qt.GlobalColor.transparent)
                 painter = QPainter(pixmap)
-                renderer.render(painter)
+                x = (width - render_width) / 2
+                y = (height - render_height) / 2
+                renderer.render(painter, QRectF(x, y, render_width, render_height))
                 painter.end()
                 logo_label.setPixmap(pixmap)
-                logo_label.setFixedHeight(height + 4)
+                logo_label.setFixedSize(QSize(width, height))
                 return logo_label
         except Exception:
             pass
