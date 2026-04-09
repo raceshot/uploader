@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QProgressBar, QFileDialog,
     QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox, QComboBox,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QTableWidget, QTableWidgetItem, QHeaderView, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QByteArray, QRectF, QSize
 import webbrowser
@@ -602,33 +602,36 @@ class RaceshotUploaderGUI(QMainWindow):
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo_label.setStyleSheet("margin-bottom: 8px;")
         logo_label.setToolTip("RaceShot")
+        logo_label.setFixedSize(QSize(192, 32))
+        logo_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         try:
             response = requests.get(LOGO_URL, timeout=10)
             response.raise_for_status()
             renderer = QSvgRenderer(QByteArray(response.content))
             if renderer.isValid():
-                default_size = renderer.defaultSize()
-                width = 192
-                height = 32
-                available_width = width - 4
-                available_height = height - 2
-                render_width = available_width
-                render_height = available_height
-                if default_size.width() > 0 and default_size.height() > 0:
-                    scale = min(available_width / default_size.width(), available_height / default_size.height())
-                    render_width = default_size.width() * scale
-                    render_height = default_size.height() * scale
+                width = logo_label.width()
+                height = logo_label.height()
+                content_width = width - 8
+                content_height = height - 6
+                view_box = renderer.viewBoxF()
+                render_width = content_width
+                render_height = content_height
+                if view_box.width() > 0 and view_box.height() > 0:
+                    scale = min(content_width / view_box.width(), content_height / view_box.height())
+                    render_width = view_box.width() * scale
+                    render_height = view_box.height() * scale
 
                 pixmap = QPixmap(width, height)
                 pixmap.fill(Qt.GlobalColor.transparent)
                 painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
                 x = (width - render_width) / 2
                 y = (height - render_height) / 2
                 renderer.render(painter, QRectF(x, y, render_width, render_height))
                 painter.end()
                 logo_label.setPixmap(pixmap)
-                logo_label.setFixedSize(QSize(width, height))
                 return logo_label
         except Exception:
             pass
@@ -670,7 +673,7 @@ class RaceshotUploaderGUI(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         
         # 標題 Logo
-        main_layout.addWidget(self.build_logo_widget())
+        main_layout.addWidget(self.build_logo_widget(), alignment=Qt.AlignmentFlag.AlignHCenter)
         
         # 參數設定區
         params_group = QGroupBox("上傳參數")
