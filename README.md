@@ -8,7 +8,6 @@
   - `eventId`: 活動ID (必填)
   - `bibNumber`: 號碼布號碼 (可選)
   - `location`: 拍攝地點 (必填)
-  - `price`: 價格 (必填，預設 30)
   - `longitude`: 經度 (可選)
   - `latitude`: 緯度 (可選)
 
@@ -34,7 +33,6 @@ pip install -r requirements.txt
 python3 uploader.py --dir <圖片資料夾> \
   --event-id <活動ID> \
   --location <拍攝地點> \
-  [--price <價格，預設30>] \
   [--bib-number <號碼布>] \
   [--longitude <經度>] \
   [--latitude <緯度>] \
@@ -57,8 +55,7 @@ python3 uploader.py --dir <圖片資料夾> \
 export RACESHOT_API_TOKEN="YOUR_TOKEN"
 python3 uploader.py --dir ~/photos \
   --event-id event-123 \
-  --location "Finish Line" \
-  --price 30
+  --location "Finish Line"
 ```
 
 ```bash
@@ -170,6 +167,7 @@ python3 uploader.py --dir ./images \
 - 地圖功能需要網際網路連線以載入 OpenStreetMap 瓦片和 Leaflet 庫。
 - GPX 自動匹配依賴照片 EXIF 拍攝時間；若照片沒有 `DateTimeOriginal` 等時間欄位，將無法自動對時。
 - 若 GPX 與照片時間有落差，請先調整「時間偏移」再上傳。
+- 價格已由平台統一定價，GUI 不再提供價格輸入欄位。
 
 ## 疑難排解
 

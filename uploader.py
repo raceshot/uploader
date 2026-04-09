@@ -163,7 +163,7 @@ def parseArgs(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dir", dest="directory", required=False, default=None, help="要遞迴上傳的圖片資料夾（可用環境變數 RACESHOT_DIR）")
     parser.add_argument("--event-id", dest="event_id", required=False, default=None, help="活動 ID（可用環境變數 RACESHOT_EVENT_ID）")
     parser.add_argument("--location", dest="location", required=False, default=None, help="拍攝地點（可用環境變數 RACESHOT_LOCATION）")
-    parser.add_argument("--price", dest="price", type=int, default=None, help=f"價格（可用環境變數 RACESHOT_PRICE；未提供則預設 {DEFAULT_PRICE}）")
+    parser.add_argument("--price", dest="price", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--bib-number", dest="bib_number", default=None, help="號碼布號碼 (可選)")
     parser.add_argument("--token", dest="token", default=None, help="API Token；可用環境變數 RACESHOT_API_TOKEN")
     parser.add_argument("--max-retries", dest="max_retries", type=int, default=None, help="最大重試次數（可用環境變數 RACESHOT_MAX_RETRIES；未提供則預設 3）")

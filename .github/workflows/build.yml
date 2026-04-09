@@ -61,5 +61,6 @@ jobs:
         files: dist/**/*
         draft: false
         prerelease: false
+        body: "使用說明：https://ylf.pw/nXTz"
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

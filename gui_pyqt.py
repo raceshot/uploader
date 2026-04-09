@@ -15,11 +15,12 @@ from PyQt6.QtWidgets import (
     QMessageBox, QGroupBox, QSpinBox, QDialog, QDoubleSpinBox, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QByteArray
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont, QIcon, QPixmap, QPainter
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 import tempfile
 
@@ -48,6 +49,10 @@ from uploader import (
     consume_limited_futures,
 )
 import requests
+
+
+FIXED_UPLOAD_PRICE = 169
+LOGO_URL = "https://raceshot.app/Logo_RaceShot_H_Primary_White.svg"
 
 
 class TokenCallbackHandler(BaseHTTPRequestHandler):
@@ -98,8 +103,8 @@ class MapPickerDialog(QDialog):
         layout = QVBoxLayout(self)
         
         # 說明文字
-        info_text = QLabel("💡 提示：在地圖上點擊以選擇拍攝地點，或直接輸入座標")
-        info_text.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 5px;")
+        info_text = QLabel("提示：在地圖上點擊以選擇拍攝地點，或直接輸入座標")
+        info_text.setStyleSheet("color: #666; font-size: 16px; margin-bottom: 5px;")
         layout.addWidget(info_text)
         
         # 建立地圖
@@ -134,9 +139,9 @@ class MapPickerDialog(QDialog):
         
         # 確認按鈕
         button_layout = QHBoxLayout()
-        confirm_btn = QPushButton("✅ 確認")
+        confirm_btn = QPushButton("確認")
         confirm_btn.clicked.connect(self.accept)
-        cancel_btn = QPushButton("❌ 取消")
+        cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
         button_layout.addWidget(confirm_btn)
         button_layout.addWidget(cancel_btn)
@@ -590,6 +595,43 @@ class RaceshotUploaderGUI(QMainWindow):
         
         self.init_ui()
         self.load_config()
+
+    def build_logo_widget(self) -> QLabel:
+        """建立標題 logo；若遠端載入失敗則回退為純文字標題。"""
+        logo_label = QLabel()
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_label.setStyleSheet("background-color: #B22529; border-radius: 10px; padding: 14px; margin-bottom: 10px;")
+        logo_label.setMinimumHeight(92)
+        logo_label.setToolTip("RaceShot")
+
+        try:
+            response = requests.get(LOGO_URL, timeout=10)
+            response.raise_for_status()
+            renderer = QSvgRenderer(QByteArray(response.content))
+            if renderer.isValid():
+                default_size = renderer.defaultSize()
+                width = 420
+                if default_size.width() > 0 and default_size.height() > 0:
+                    height = max(70, int(default_size.height() * width / default_size.width()))
+                else:
+                    height = 80
+
+                pixmap = QPixmap(width, height)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                renderer.render(painter)
+                painter.end()
+                logo_label.setPixmap(pixmap)
+                return logo_label
+        except Exception:
+            pass
+
+        logo_label.setText("運動拍檔 Raceshot 圖片上傳工具")
+        logo_label.setFont(QFont("Arial", 20, QFont.Weight.Bold))
+        logo_label.setStyleSheet(
+            "background-color: #B22529; color: white; border-radius: 10px; padding: 18px; margin-bottom: 10px;"
+        )
+        return logo_label
         
     def init_ui(self):
         self.setWindowTitle("運動拍檔 Raceshot 圖片上傳工具")
@@ -620,11 +662,8 @@ class RaceshotUploaderGUI(QMainWindow):
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(20, 20, 20, 20)
         
-        # 標題
-        title = QLabel("運動拍檔 Raceshot 圖片上傳工具")
-        title.setFont(QFont("Arial", 20, QFont.Weight.Bold))
-        title.setStyleSheet("color: #B22529; margin-bottom: 10px;")
-        main_layout.addWidget(title)
+        # 標題 Logo
+        main_layout.addWidget(self.build_logo_widget())
         
         # 參數設定區
         params_group = QGroupBox("上傳參數")
@@ -636,11 +675,11 @@ class RaceshotUploaderGUI(QMainWindow):
         
         # 登入狀態與按鈕
         params_layout.addWidget(QLabel("帳號登入"), row, 0)
-        self.login_status_label = QLabel("🔴 未登入")
+        self.login_status_label = QLabel("未登入")
         self.login_status_label.setStyleSheet("color: red; font-weight: bold; padding: 8px;")
         params_layout.addWidget(self.login_status_label, row, 1)
         
-        self.login_btn = QPushButton("🌐 網頁登入")
+        self.login_btn = QPushButton("網頁登入")
         self.login_btn.clicked.connect(self.open_login_web)
         self.login_btn.setStyleSheet("padding: 8px 10px; background-color: #4CAF50; color: white; border-radius: 4px;")
         params_layout.addWidget(self.login_btn, row, 2)
@@ -666,7 +705,7 @@ class RaceshotUploaderGUI(QMainWindow):
         self.event_combo.setEditable(True)  # 允許手動輸入
         params_layout.addWidget(self.event_combo, row, 1)
         
-        self.refresh_events_btn = QPushButton("🔄 更新列表")
+        self.refresh_events_btn = QPushButton("更新列表")
         self.refresh_events_btn.clicked.connect(self.load_events_list)
         self.refresh_events_btn.setStyleSheet("padding: 8px 10px; background-color: #f0f0f0; border: 1px solid #ccc; border-radius: 4px;")
         params_layout.addWidget(self.refresh_events_btn, row, 2)
@@ -702,7 +741,7 @@ class RaceshotUploaderGUI(QMainWindow):
         self.latitude_entry.setPrefix("緯: ")
         coord_layout.addWidget(self.latitude_entry)
         
-        map_btn = QPushButton("🗺️ 地圖選擇")
+        map_btn = QPushButton("地圖選擇")
         map_btn.clicked.connect(self.open_map_picker)
         map_btn.setStyleSheet("padding: 8px 20px; background-color: #4CAF50; color: white; border: 1px solid #45a049; border-radius: 4px;")
         coord_layout.addWidget(map_btn)
@@ -713,16 +752,16 @@ class RaceshotUploaderGUI(QMainWindow):
         params_layout.addWidget(QLabel("GPX 軌跡"), row, 0)
         gpx_layout = QHBoxLayout()
         self.gpx_file_entry = QLineEdit()
-        self.gpx_file_entry.setPlaceholderText("可選：選擇 .gpx，自動依照片時間匹配座標")
+        self.gpx_file_entry.setPlaceholderText("可選：選擇 .gpx 檔，自動依照片時間匹配拍攝座標")
         self.gpx_file_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
         gpx_layout.addWidget(self.gpx_file_entry)
 
-        gpx_browse_btn = QPushButton("📍 選擇 GPX")
+        gpx_browse_btn = QPushButton("選擇 GPX")
         gpx_browse_btn.clicked.connect(self.browse_gpx_file)
         gpx_browse_btn.setStyleSheet("padding: 8px 16px; background-color: #607D8B; color: white; border-radius: 4px;")
         gpx_layout.addWidget(gpx_browse_btn)
 
-        self.gpx_preview_btn = QPushButton("👀 抽樣預覽")
+        self.gpx_preview_btn = QPushButton("抽樣預覽")
         self.gpx_preview_btn.clicked.connect(self.preview_gpx_matches)
         self.gpx_preview_btn.setStyleSheet("padding: 8px 16px; background-color: #8E6C3A; color: white; border-radius: 4px;")
         gpx_layout.addWidget(self.gpx_preview_btn)
@@ -767,23 +806,8 @@ class RaceshotUploaderGUI(QMainWindow):
         params_layout.addLayout(gpx_options_layout, row, 1, 1, 3)
         row += 1
         
-        # 價格與號碼布
-        params_layout.addWidget(QLabel("價格"), row, 0)
-        self.price_entry = QSpinBox()
-        self.price_entry.setRange(60, 10000)
-        self.price_entry.setValue(169)
-        self.price_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
-        params_layout.addWidget(self.price_entry, row, 1)
-        
-        # params_layout.addWidget(QLabel("號碼布"), row, 2)
-        # self.bib_entry = QLineEdit()
-        # self.bib_entry.setPlaceholderText("可選")
-        # self.bib_entry.setStyleSheet("padding: 8px; border: 1px solid #ccc; border-radius: 4px;")
-        # params_layout.addWidget(self.bib_entry, row, 3)
-        row += 1
-        
         # 進階設定
-        advanced_label = QLabel("進階設定")
+        advanced_label = QLabel("進階設定（非必要請勿調整）")
         advanced_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
         params_layout.addWidget(advanced_label, row, 0, 1, 4)
         row += 1
@@ -850,7 +874,7 @@ class RaceshotUploaderGUI(QMainWindow):
         button_layout = QHBoxLayout()
         button_layout.setSpacing(10)
         
-        self.start_btn = QPushButton("🚀 開始上傳")
+        self.start_btn = QPushButton("開始上傳")
         self.start_btn.clicked.connect(self.start_upload)
         self.start_btn.setStyleSheet("""
             QPushButton {
@@ -867,7 +891,7 @@ class RaceshotUploaderGUI(QMainWindow):
         """)
         button_layout.addWidget(self.start_btn)
         
-        self.stop_btn = QPushButton("⏸️ 停止")
+        self.stop_btn = QPushButton("停止")
         self.stop_btn.clicked.connect(self.stop_upload)
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet("""
@@ -887,7 +911,7 @@ class RaceshotUploaderGUI(QMainWindow):
         """)
         button_layout.addWidget(self.stop_btn)
         
-        clear_log_btn = QPushButton("🗑️ 清除日誌")
+        clear_log_btn = QPushButton("清除日誌")
         clear_log_btn.clicked.connect(self.clear_log)
         clear_log_btn.setStyleSheet("""
             QPushButton {
@@ -905,7 +929,7 @@ class RaceshotUploaderGUI(QMainWindow):
         
         # 新增一行：重試失敗按鈕
         retry_layout = QHBoxLayout()
-        self.retry_btn = QPushButton("🔄 一鍵重新上傳失敗檔案")
+        self.retry_btn = QPushButton("一鍵重新上傳失敗檔案")
         self.retry_btn.clicked.connect(self.retry_failures)
         self.retry_btn.setStyleSheet("""
             QPushButton {
@@ -943,8 +967,6 @@ class RaceshotUploaderGUI(QMainWindow):
                     self.event_combo.setCurrentText(config['event_id'])
                 if 'location' in config:
                     self.location_entry.setText(config['location'])
-                if 'price' in config:
-                    self.price_entry.setValue(config['price'])
                 if 'bib_number' in config:
                     pass # bib_entry removed
                 if 'longitude' in config:
@@ -983,7 +1005,6 @@ class RaceshotUploaderGUI(QMainWindow):
                 'folder': self.folder_entry.text().strip(),
                 'event_id': self.event_combo.currentText().strip().split(' (')[0] if self.event_combo.currentText() else "",
                 'location': self.location_entry.text().strip(),
-                'price': self.price_entry.value(),
                 'bib_number': "", # bib_entry removed
                 'longitude': self.longitude_entry.value(),
                 'latitude': self.latitude_entry.value(),
@@ -1011,7 +1032,7 @@ class RaceshotUploaderGUI(QMainWindow):
         else:
             login_url = "http://localhost:5173/uploader-auth"
         webbrowser.open(login_url)
-        self.login_status_label.setText("⏳ 等待授權...")
+        self.login_status_label.setText("等待授權...")
         self.login_status_label.setStyleSheet("color: orange; font-weight: bold; padding: 8px;")
 
     def on_token_received(self, token):
@@ -1019,12 +1040,12 @@ class RaceshotUploaderGUI(QMainWindow):
         is_valid, user, msg = verifyToken(token)
         if is_valid:
             role = user.get('role', 'user')
-            self.login_status_label.setText(f"🟢 已登入 ({role})")
+            self.login_status_label.setText(f"已登入 ({role})")
             self.login_status_label.setStyleSheet("color: green; font-weight: bold; padding: 8px;")
             self.save_config()
             self.load_events_list()
         else:
-            self.login_status_label.setText("🔴 登入失敗或過期")
+            self.login_status_label.setText("登入失敗或過期")
             self.login_status_label.setStyleSheet("color: red; font-weight: bold; padding: 8px;")
             self.current_token = ""
             QMessageBox.warning(self, "Token 驗證失敗", f"Token 無效或已過期，請重新登入。({msg})")
@@ -1042,7 +1063,7 @@ class RaceshotUploaderGUI(QMainWindow):
 
         success, evs, msg = fetch()
         self.refresh_events_btn.setEnabled(True)
-        self.refresh_events_btn.setText("🔄 更新列表")
+        self.refresh_events_btn.setText("更新列表")
         
         if success:
             current_ev = self.event_combo.currentText().strip().split(' (')[0]
@@ -1118,7 +1139,7 @@ class RaceshotUploaderGUI(QMainWindow):
             QMessageBox.critical(self, "GPX 抽樣預覽失敗", str(e))
         finally:
             self.gpx_preview_btn.setEnabled(True)
-            self.gpx_preview_btn.setText("👀 抽樣預覽")
+            self.gpx_preview_btn.setText("抽樣預覽")
     
     def open_map_picker(self):
         """打開地圖選擇對話框"""
@@ -1216,7 +1237,7 @@ class RaceshotUploaderGUI(QMainWindow):
             'event_id': actual_event_id,
             'endpoint': upload_endpoint,
             'location': self.location_entry.text().strip(),
-            'price': self.price_entry.value(),
+            'price': FIXED_UPLOAD_PRICE,
             'bib_number': None, # bib_entry removed
             'longitude': self.longitude_entry.value() if self.longitude_entry.value() != 0 else None,
             'latitude': self.latitude_entry.value() if self.latitude_entry.value() != 0 else None,
