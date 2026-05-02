@@ -656,11 +656,7 @@ def uploadSingleImage(
         form_data["latitude"] = str(latitude)
 
     image_file = buildMultipart(file_path)
-    images_field = [
-        ("file", image_file[1]),
-        ("image", image_file[1]),
-        ("images", image_file[1])
-    ]
+    images_field = [("image", image_file[1])]
 
     attempt = 0
     last_error: Optional[str] = None
